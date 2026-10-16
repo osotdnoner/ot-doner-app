@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% load static %}
+{% block content %}
+
+<p class="muted hello">Здравствуйте, {{ user.first_name|default:user.username }}</p>
+
+{% if not shift %}
+  {# ---------- 1. Ещё не отметился ---------- #}
+  <div class="card">
+    <div class="card-label">{% if points|length > 1 %}Ваши точки{% else %}Точка{% endif %}</div>
+    <div class="card-title">
+      {% for p in points %}«{{ p.name }}»{% if not forloop.last %}, {% endif %}{% empty %}не назначена{% endfor %}
+    </div>
+    {% if upcoming %}
+      <div class="row"><span>{{ upcoming_name }} смена</span><b>начало в {{ upcoming.start|time:"H:i" }}</b></div>
+    {% elif points|length > 1 %}
+      <p class="hint">Смена определится по точке, где вы отметитесь.</p>
+    {% endif %}
+  </div>
+
+  {% if points %}
+    {% csrf_token %}
+    <button id="checkin-btn" class="btn btn-primary btn-big" data-url="{% url 'checkin' %}">Я пришёл на смену</button>
+    <p class="hint">Приложение проверит, что вы в ресторане, и попросит селфи. Разрешите доступ к геолокации и камере.</p>
+    <div id="status" class="alert" hidden></div>
+
+    <div id="camera" class="sheet" hidden>
+      <div class="sheet-inner">
+        <div class="sheet-title">Селфи для отметки</div>
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="canvas" hidden></canvas>
+        <button id="snap" class="btn btn-primary">Сделать снимок</button>
+        <button id="cancel" class="btn btn-ghost">Отмена</button>
+      </div>
+    </div>
+  {% else %}
+    <div class="alert alert-error">Вы не закреплены ни за одной точкой. Обратитесь к управляющему.</div>
+  {% endif %}
+
+{% elif late_form %}
+  {# ---------- 2. Опоздал: нужна причина ---------- #}
+  <div class="alert alert-late">
+    <div class="alert-title">Вы опоздали на {{ shift.late_human }}</div>
+    Смена началась в {{ shift.planned_start|time:"H:i" }}, вы отметились в {{ shift.checked_in_at|time:"H:i" }}.
+  </div>
+  <form method="post" action="{% url 'late_reason' shift.id %}" class="card form">
+    {% csrf_token %}
+    <label for="id_reason">{{ late_form.reason.label }}</label>
+    {{ late_form.reason }}
+    {% for error in late_form.reason.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+    <button type="submit" class="btn btn-primary">Отправить причину</button>
+    <p class="hint">Управляющий получит сообщение с причиной. Без неё приём смены не откроется.</p>
+  </form>
+
+{% else %}
+  {# ---------- 3. На смене ---------- #}
+  <div class="badge badge-ok">Вы на смене</div>
+  <div class="card">
+    <div class="card-label">Точка «{{ shift.point.name }}»</div>
+    <div class="card-title">{{ shift.get_kind_display }} смена · {{ shift.planned_start|time:"H:i" }}–{{ shift.planned_end|time:"H:i" }}</div>
+    <div class="row"><span>Отметка</span><b>{{ shift.checked_in_at|time:"H:i" }}</b></div>
+    <div class="row">
+      <span>Приход</span>
+      {% if shift.late_minutes %}<b class="text-late">опоздание {{ shift.late_human }}</b>{% else %}<b class="text-ok">вовремя</b>{% endif %}
+    </div>
+    <div class="row"><span>До точки</span><b>{{ shift.distance_m|floatformat:0 }} м</b></div>
+    {% if shift.selfie %}<img class="selfie" src="{{ shift.selfie.url }}" alt="Селфи при отметке">{% endif %}
+  </div>
+
+  <div class="card card-next">
+    <div class="card-label">Следующий шаг</div>
+    <div class="card-title">Приём смены: осмотр зала</div>
+    <p class="hint">Зал, санузлы, персонал и униформа. Появится в следующей версии.</p>
+    <button class="btn btn-primary" disabled>Скоро</button>
+  </div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+  {% if not shift and points %}<script src="{% static 'js/checkin.js' %}"></script>{% endif %}
+{% endblock %}

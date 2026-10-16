@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="muted hello">Здравствуйте, {{ user.first_name|default:user.username }}</p>
+<h1>Смены за сутки</h1>
+
+<div class="card">
+  {% for s in shifts %}
+    <div class="row row-shift">
+      <span><b>«{{ s.point.name }}»</b> · {{ s.get_kind_display|lower }} · {{ s.admin }}</span>
+      {% if s.late_minutes %}
+        <b class="text-late">{{ s.checked_in_at|time:"H:i" }}, +{{ s.late_human }}</b>
+      {% else %}
+        <b class="text-ok">{{ s.checked_in_at|time:"H:i" }}</b>
+      {% endif %}
+    </div>
+  {% empty %}
+    <p class="hint">За последние сутки отметок нет.</p>
+  {% endfor %}
+</div>
+
+<a class="btn btn-ghost" href="{% url 'admin:index' %}">Панель управления: точки, люди, смены</a>
+{% endblock %}

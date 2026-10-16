@@ -1,0 +1,7 @@
+Django>=5.2,<5.3
+Pillow>=11
+tzdata>=2024.1
+dj-database-url>=2.2
+python-dotenv>=1.0
+requests>=2.32
+psycopg[binary]>=3.2

@@ -1,0 +1,17 @@
+# Секреты и локальные данные — в GitHub не попадают
+.env
+db.sqlite3
+media/
+staticfiles/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Редакторы и система
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

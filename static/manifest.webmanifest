@@ -1,0 +1,12 @@
+{
+  "name": "ОТ Донер — администратор",
+  "short_name": "ОТ Донер",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f3ef",
+  "theme_color": "#c2410c",
+  "lang": "ru",
+  "icons": [
+    { "src": "/static/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

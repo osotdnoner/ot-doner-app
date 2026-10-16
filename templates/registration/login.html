@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Вход · ОТ Донер{% endblock %}
+{% block content %}
+<section class="login">
+  <h1>Вход</h1>
+  <p class="muted">Приложение администратора смены</p>
+
+  <form method="post" class="card form">
+    {% csrf_token %}
+    {% if form.non_field_errors %}
+      <div class="alert alert-error">Неверный телефон или пароль.</div>
+    {% endif %}
+    <label for="id_username">Телефон</label>
+    <input type="tel" name="username" id="id_username" autocomplete="username" inputmode="tel"
+           placeholder="87011234567" value="{{ form.username.value|default:'' }}" required autofocus>
+    <label for="id_password">Пароль</label>
+    <input type="password" name="password" id="id_password" autocomplete="current-password" required>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit" class="btn btn-primary">Войти</button>
+  </form>
+</section>
+{% endblock %}
