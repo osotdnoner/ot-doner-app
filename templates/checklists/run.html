@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}{{ run.template.title }} · ОТ Донер{% endblock %}
+{% block content %}
+{% csrf_token %}
+<a class="back" href="{% url 'home' %}">← На главную</a>
+<h1>{{ run.template.title }}</h1>
+<p class="muted">Точка «{{ shift.point.name }}» · отмечено {{ done }} из {{ total }}</p>
+<div class="progress"><div class="progress-bar" style="width: {% widthratio done total 100 %}%"></div></div>
+
+{% if run.finished_at %}
+  <div class="alert">Осмотр завершён в {{ run.finished_at|time:"H:i" }}. Ответы больше не меняются.</div>
+{% endif %}
+
+{% for view in sections %}
+  <h2 class="section-title">{{ view.section.title }}</h2>
+
+  {# ----- Сотрудники смены ----- #}
+  {% for employee, check in view.staff %}
+    <article class="item" id="emp-{{ employee.id }}">
+      <div class="item-head">
+        <div>
+          <div class="item-title">{{ employee.full_name }}</div>
+          <div class="item-hint">{{ employee.get_position_display }}</div>
+        </div>
+        {% if check %}
+          {% if check.attendance == "absent" %}<span class="pill pill-critical">Не вышел</span>
+          {% elif check.not_admitted %}<span class="pill pill-critical">Не допущен</span>
+          {% elif check.uniform_ok is False %}<span class="pill pill-deviation">Нарушение формы</span>
+          {% else %}<span class="pill pill-ok">{{ check.get_attendance_display }}, форма в порядке</span>{% endif %}
+        {% endif %}
+      </div>
+      {% if check %}
+        {% if check.uniform_missing or check.comment %}
+          <div class="item-summary">{{ check.uniform_missing }}{% if check.uniform_missing and check.comment %} · {% endif %}{{ check.comment }}</div>
+        {% endif %}
+        {% if check.photo %}<img class="thumb" src="{{ check.photo.url }}" alt="Фото сотрудника">{% endif %}
+        {% if not run.finished_at %}<button type="button" class="link edit" data-edit="staff-form-{{ employee.id }}">Изменить</button>{% endif %}
+      {% endif %}
+      {% if not run.finished_at %}
+      <form class="staff-form" id="staff-form-{{ employee.id }}" {% if check %}hidden{% endif %}
+            data-url="{% url 'answer_staff' run.id employee.id %}" data-label="{{ employee.full_name }}">
+        <div class="segmented">
+          <label><input type="radio" name="attendance" value="present" {% if check.attendance == "present" %}checked{% endif %}><span>Пришёл</span></label>
+          <label><input type="radio" name="attendance" value="late" {% if check.attendance == "late" %}checked{% endif %}><span>Опоздал</span></label>
+          <label><input type="radio" name="attendance" value="absent" {% if check.attendance == "absent" %}checked{% endif %}><span>Не вышел</span></label>
+        </div>
+        <div class="uniform-part" hidden>
+          <div class="segmented">
+            <label><input type="radio" name="uniform" value="ok" {% if check.uniform_ok %}checked{% endif %}><span>Форма в порядке</span></label>
+            <label><input type="radio" name="uniform" value="violation" {% if check.uniform_ok is False %}checked{% endif %}><span>Нарушение</span></label>
+          </div>
+          <div class="missing-part" hidden>
+            <div class="field-label">Чего нет или что не так</div>
+            <div class="chips">
+              {% for u in uniform_items %}
+                <label class="chip"><input type="checkbox" name="missing" value="{{ u }}"><span>{{ u }}</span></label>
+              {% endfor %}
+            </div>
+          </div>
+          <label class="check-line"><input type="checkbox" name="not_admitted" value="1"> Не допущен к работе (признаки болезни, опьянение)</label>
+          <textarea name="comment" rows="2" placeholder="Комментарий, например: пришёл без фартука, выдан запасной"></textarea>
+        </div>
+        <button type="button" class="btn btn-primary save-staff">Сохранить</button>
+        <div class="item-error" hidden></div>
+      </form>
+      {% endif %}
+    </article>
+  {% empty %}
+    {% if view.section.includes_staff %}
+      <p class="hint">У точки нет сотрудников в списке. Управляющий добавляет их в панели управления.</p>
+    {% endif %}
+  {% endfor %}
+
+  {# ----- Пункты ----- #}
+  {% for entry in view.entries %}
+    <article class="item {% if entry.result %}item-{{ entry.result.status }}{% endif %}" id="e-{{ entry.item.id }}-{{ entry.toilet_no }}">
+      <div class="item-head">
+        <div class="item-title">{{ entry.label }}</div>
+        {% if entry.result %}<span class="pill pill-{{ entry.result.status }}">{{ entry.result.get_status_display }}</span>
+        {% elif entry.photo_ok %}<span class="pill pill-photo">Нужно фото</span>{% endif %}
+      </div>
+      {% if entry.item.hint %}<div class="item-hint">{{ entry.item.hint }}</div>{% endif %}
+
+      {% if entry.result %}
+        {% if entry.result.problem or entry.result.comment %}
+          <div class="item-summary">{{ entry.result.problem }}{% if entry.result.problem and entry.result.comment %} · {% endif %}{{ entry.result.comment }}</div>
+        {% endif %}
+        {% if entry.result.photo %}<img class="thumb" src="{{ entry.result.photo.url }}" alt="Фото">{% endif %}
+        {% if entry.result.task %}
+          <div class="item-task">Задача: {% if entry.result.task.responsible %}{{ entry.result.task.responsible }}{% else %}ответственный не назначен{% endif %}, до {{ entry.result.task.deadline|time:"H:i" }}</div>
+        {% elif not run.finished_at %}
+          <button type="button" class="link edit" data-edit="form-{{ entry.item.id }}-{{ entry.toilet_no }}">Изменить</button>
+        {% endif %}
+      {% endif %}
+
+      {% if not run.finished_at and entry.result.status != "deviation" and entry.result.status != "critical" %}
+      <form class="item-form" id="form-{{ entry.item.id }}-{{ entry.toilet_no }}" {% if entry.result %}hidden{% endif %}
+            data-url="{% url 'answer_item' run.id entry.item.id entry.toilet_no %}" data-label="{{ entry.label }}"
+            data-photo-ok="{{ entry.photo_ok|yesno:'1,0' }}" data-photo-problem="{{ entry.photo_problem|yesno:'1,0' }}">
+        <div class="status-buttons">
+          <button type="button" class="sb sb-ok" data-status="ok">Норма</button>
+          <button type="button" class="sb sb-deviation" data-status="deviation">Отклонение</button>
+          <button type="button" class="sb sb-critical" data-status="critical">Критично</button>
+        </div>
+        <div class="problem-panel" hidden>
+          <label class="field-label">Что не так</label>
+          <select name="problem">
+            <option value="">— выберите или опишите ниже —</option>
+            {% for p in entry.item.problem_list %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+            {% for p in entry.item.critical_list %}<option value="{{ p }}">{{ p }} — критично</option>{% endfor %}
+          </select>
+          <textarea name="comment" rows="2" placeholder="Комментарий"></textarea>
+          <label class="field-label">Кто устраняет</label>
+          <select name="responsible">
+            <option value="">— не назначен —</option>
+            {% for e in employees %}<option value="{{ e.id }}">{{ e.full_name }} · {{ e.get_position_display|lower }}</option>{% endfor %}
+          </select>
+          <label class="field-label">Срок</label>
+          <select name="deadline">
+            {% for minutes, label in deadlines %}<option value="{{ minutes }}">{{ label }}</option>{% endfor %}
+          </select>
+          <button type="button" class="btn btn-primary submit-problem">Сохранить</button>
+        </div>
+        <div class="item-error" hidden></div>
+      </form>
+      {% endif %}
+    </article>
+  {% endfor %}
+{% endfor %}
+
+{% if not run.finished_at %}
+  <form method="post" action="{% url 'finish_run' run.id %}" class="finish-bar">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-primary" {% if done < total %}disabled{% endif %}>
+      {% if done < total %}Отмечено {{ done }} из {{ total }}{% else %}Завершить осмотр{% endif %}
+    </button>
+  </form>
+{% endif %}
+
+{% include "partials/camera_sheet.html" %}
+{% endblock %}
+
+{% block scripts %}
+  <script src="{% static 'js/camera.js' %}"></script>
+  <script src="{% static 'js/checklist.js' %}"></script>
+{% endblock %}

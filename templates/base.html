@@ -21,6 +21,9 @@
     {% endif %}
   </header>
   <main class="page">
+    {% for message in messages %}
+      <div class="alert {% if message.tags == 'error' %}alert-error{% elif message.tags == 'success' %}alert-ok{% endif %}">{{ message }}</div>
+    {% endfor %}
     {% block content %}{% endblock %}
   </main>
   {% block scripts %}{% endblock %}

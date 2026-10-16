@@ -199,3 +199,38 @@ class TelegramTests(TestCase):
             post.return_value.raise_for_status.return_value = None
             self.assertTrue(send_message("111", "проверка"))
         self.assertIn("/bottest-token/sendMessage", post.call_args.args[0])
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", MISSED_CHECKIN_ALERT_MINUTES=10)
+class ReminderTests(TestCase):
+    def setUp(self):
+        self.point = Point.objects.create(name="27", latitude=POINT_LAT, longitude=POINT_LON)
+
+    def test_missed_checkin_is_reported_once(self):
+        from shifts.management.commands.send_reminders import notify_missed_checkins
+        with mock.patch("shifts.management.commands.send_reminders.notify_point_managers") as notify:
+            self.assertEqual(notify_missed_checkins(at(10, 5)), 0)   # ещё рано
+            self.assertEqual(notify_missed_checkins(at(10, 12)), 1)
+            self.assertEqual(notify_missed_checkins(at(10, 20)), 0)  # уже сообщили
+        self.assertIn("никто из администраторов не отметился", notify.call_args.args[1])
+
+    def test_no_report_when_admin_checked_in(self):
+        from shifts.management.commands.send_reminders import notify_missed_checkins
+        admin = User.objects.create_user("87010000001", password="x")
+        admin.points.add(self.point)
+        perform_checkin(admin, POINT_LAT, POINT_LON, 20, fake_selfie(), now=at(9, 58))
+        with mock.patch("shifts.management.commands.send_reminders.notify_point_managers"):
+            self.assertEqual(notify_missed_checkins(at(10, 12)), 0)
+
+    def test_overdue_task_is_reported_once(self):
+        from checklists.models import Task
+        from shifts.management.commands.send_reminders import notify_overdue_tasks
+        admin = User.objects.create_user("87010000001", password="x")
+        admin.points.add(self.point)
+        shift = perform_checkin(admin, POINT_LAT, POINT_LON, 20, fake_selfie(), now=at(9, 58)).shift
+        Task.objects.create(point=self.point, shift=shift, title="Освещение — Не горит лампа", deadline=at(10, 30))
+        with mock.patch("shifts.management.commands.send_reminders.notify_point_managers") as notify:
+            self.assertEqual(notify_overdue_tasks(at(10, 20)), 0)
+            self.assertEqual(notify_overdue_tasks(at(10, 31)), 1)
+            self.assertEqual(notify_overdue_tasks(at(10, 40)), 0)
+        self.assertIn("срок был 10:30", notify.call_args.args[1])

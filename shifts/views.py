@@ -7,6 +7,8 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
+from checklists.models import ChecklistTemplate
+from checklists.services import open_tasks, progress
 from notifications.telegram import notify_point_managers
 
 from .forms import CheckinForm, LateReasonForm
@@ -40,7 +42,21 @@ def home(request):
         "upcoming": upcoming,
         "upcoming_name": dict(Shift.Kind.choices)[upcoming.kind] if upcoming else None,
         "late_form": LateReasonForm() if shift and shift.needs_late_reason else None,
+        "tabs": acceptance_tabs(shift) if shift else [],
+        "tasks": list(open_tasks(shift.point)) if shift else [],
+        "now": now,
     })
+
+
+def acceptance_tabs(shift):
+    """Вкладки приёма смены и сколько в каждой уже отмечено."""
+    runs = {r.template_id: r for r in shift.checklist_runs.all()}
+    tabs = []
+    for template in ChecklistTemplate.objects.filter(is_active=True):
+        run = runs.get(template.id)
+        done, total = progress(run) if run else (0, 0)
+        tabs.append({"template": template, "run": run, "done": done, "total": total})
+    return tabs
 
 
 def manager_home(request):

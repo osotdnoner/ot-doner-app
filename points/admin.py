@@ -9,7 +9,7 @@ class PointAdmin(admin.ModelAdmin):
     list_filter = ("is_active",)
     search_fields = ("name", "address")
     fieldsets = (
-        (None, {"fields": ("name", "address", "is_active")}),
+        (None, {"fields": ("name", "address", "toilets_count", "is_active")}),
         ("Территория", {
             "fields": ("latitude", "longitude", "radius_m"),
             "description": "Координаты входа: в 2ГИС или Google Maps нажмите на место правой кнопкой "

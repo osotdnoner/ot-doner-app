@@ -49,6 +49,8 @@ INSTALLED_APPS = [
     "accounts",  # пользователи и роли
     "points",    # точки (рестораны)
     "shifts",    # смены и отметка «Я пришёл»
+    "staff",     # сотрудники точек
+    "checklists",  # чек-листы приёма смены, ответы, задачи
 ]
 
 MIDDLEWARE = [
@@ -131,6 +133,15 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 CHECKIN_EARLY_MINUTES = int(os.getenv("CHECKIN_EARLY_MINUTES", 60))
 # Если GPS определяет место хуже, чем на столько метров, просим подождать
 CHECKIN_MAX_ACCURACY_M = int(os.getenv("CHECKIN_MAX_ACCURACY_M", 150))
+# Через сколько минут после начала смены сообщать управляющему, что никто не отметился
+MISSED_CHECKIN_ALERT_MINUTES = int(os.getenv("MISSED_CHECKIN_ALERT_MINUTES", 10))
+
+
+# --- Правила чек-листов ---------------------------------------------------
+# Сколько пунктов со «случайным фото» выбирать в каждой проверке
+CHECKLIST_RANDOM_PHOTOS = int(os.getenv("CHECKLIST_RANDOM_PHOTOS", 2))
+# Если на пункт в среднем ушло меньше стольких секунд, проверка помечается «слишком быстро»
+CHECKLIST_MIN_SECONDS_PER_ITEM = int(os.getenv("CHECKLIST_MIN_SECONDS_PER_ITEM", 4))
 
 
 # --- Telegram --------------------------------------------------------------

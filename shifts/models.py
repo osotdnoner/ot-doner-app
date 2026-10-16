@@ -94,3 +94,16 @@ class CheckinAttempt(models.Model):
 
     def __str__(self) -> str:
         return f"{self.admin} · {self.get_result_display()}"
+
+
+class MissedCheckinAlert(models.Model):
+    """Запоминает, что управляющему уже сообщили «на точке никто не отметился», чтобы не повторять."""
+
+    point = models.ForeignKey("points.Point", verbose_name="Точка", on_delete=models.CASCADE)
+    planned_start = models.DateTimeField("Начало смены")
+    created_at = models.DateTimeField("Сообщено", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Сообщение «никто не отметился»"
+        verbose_name_plural = "Сообщения «никто не отметился»"
+        constraints = [models.UniqueConstraint(fields=["point", "planned_start"], name="one_missed_alert_per_shift")]

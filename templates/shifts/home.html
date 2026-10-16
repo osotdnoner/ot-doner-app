@@ -23,16 +23,7 @@
     <button id="checkin-btn" class="btn btn-primary btn-big" data-url="{% url 'checkin' %}">Я пришёл на смену</button>
     <p class="hint">Приложение проверит, что вы в ресторане, и попросит селфи. Разрешите доступ к геолокации и камере.</p>
     <div id="status" class="alert" hidden></div>
-
-    <div id="camera" class="sheet" hidden>
-      <div class="sheet-inner">
-        <div class="sheet-title">Селфи для отметки</div>
-        <video id="video" playsinline autoplay muted></video>
-        <canvas id="canvas" hidden></canvas>
-        <button id="snap" class="btn btn-primary">Сделать снимок</button>
-        <button id="cancel" class="btn btn-ghost">Отмена</button>
-      </div>
-    </div>
+    {% include "partials/camera_sheet.html" %}
   {% else %}
     <div class="alert alert-error">Вы не закреплены ни за одной точкой. Обратитесь к управляющему.</div>
   {% endif %}
@@ -54,6 +45,7 @@
 
 {% else %}
   {# ---------- 3. На смене ---------- #}
+  {% csrf_token %}
   <div class="badge badge-ok">Вы на смене</div>
   <div class="card">
     <div class="card-label">Точка «{{ shift.point.name }}»</div>
@@ -63,20 +55,51 @@
       <span>Приход</span>
       {% if shift.late_minutes %}<b class="text-late">опоздание {{ shift.late_human }}</b>{% else %}<b class="text-ok">вовремя</b>{% endif %}
     </div>
-    <div class="row"><span>До точки</span><b>{{ shift.distance_m|floatformat:0 }} м</b></div>
-    {% if shift.selfie %}<img class="selfie" src="{{ shift.selfie.url }}" alt="Селфи при отметке">{% endif %}
   </div>
 
-  <div class="card card-next">
-    <div class="card-label">Следующий шаг</div>
-    <div class="card-title">Приём смены: осмотр зала</div>
-    <p class="hint">Зал, санузлы, персонал и униформа. Появится в следующей версии.</p>
-    <button class="btn btn-primary" disabled>Скоро</button>
+  <h2 class="section-title">Приём смены</h2>
+  <div class="card tabs">
+    {% for tab in tabs %}
+      <a class="tab-row" href="{% url 'checklist' shift.id tab.template.code %}">
+        <span class="tab-name">{{ forloop.counter }}. {{ tab.template.title }}</span>
+        {% if tab.run.finished_at %}
+          <span class="pill pill-ok">Готово</span>
+        {% elif tab.run %}
+          <span class="pill">{{ tab.done }} из {{ tab.total }}</span>
+        {% else %}
+          <span class="pill pill-todo">Начать</span>
+        {% endif %}
+      </a>
+    {% endfor %}
+    <p class="hint">Касса, кухня, операторская и технический персонал появятся в следующих версиях.</p>
   </div>
+
+  <h2 class="section-title">Открытые задачи{% if tasks %} · {{ tasks|length }}{% endif %}</h2>
+  {% for task in tasks %}
+    <div class="card task {% if task.is_critical %}task-critical{% endif %}">
+      <div class="task-title">{{ task.title }}</div>
+      <div class="task-meta">
+        {% if task.responsible %}{{ task.responsible }}{% else %}Ответственный не назначен{% endif %}
+        · {% if task.deadline < now %}<b class="text-late">просрочена с {{ task.deadline|time:"H:i" }}</b>{% else %}до {{ task.deadline|time:"H:i" }}{% endif %}
+      </div>
+      {% if task.result.photo %}<img class="thumb" src="{{ task.result.photo.url }}" alt="Фото проблемы">{% endif %}
+      <button type="button" class="btn btn-ghost task-close" data-url="{% url 'close_task' task.id %}">Перепроверить и закрыть</button>
+      <div class="item-error" hidden></div>
+    </div>
+  {% empty %}
+    <p class="hint">Открытых задач нет.</p>
+  {% endfor %}
+  {% include "partials/camera_sheet.html" %}
 {% endif %}
 
 {% endblock %}
 
 {% block scripts %}
-  {% if not shift and points %}<script src="{% static 'js/checkin.js' %}"></script>{% endif %}
+  {% if not shift and points %}
+    <script src="{% static 'js/camera.js' %}"></script>
+    <script src="{% static 'js/checkin.js' %}"></script>
+  {% elif shift and not late_form %}
+    <script src="{% static 'js/camera.js' %}"></script>
+    <script src="{% static 'js/checklist.js' %}"></script>
+  {% endif %}
 {% endblock %}

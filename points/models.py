@@ -33,6 +33,11 @@ class Point(models.Model):
         help_text="0 — опоздание считается с первой минуты",
     )
 
+    toilets_count = models.PositiveSmallIntegerField(
+        "Санузлов", default=1,
+        help_text="Каждый санузел проверяется отдельно и со своим фото",
+    )
+
     is_active = models.BooleanField("Работает", default=True)
 
     class Meta:

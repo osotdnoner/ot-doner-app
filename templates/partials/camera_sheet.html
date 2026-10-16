@@ -1,0 +1,10 @@
+{# Общее окно камеры. Управляется static/js/camera.js #}
+<div id="camera" class="sheet" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-title" id="camera-title">Фото</div>
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="canvas" hidden></canvas>
+    <button type="button" id="snap" class="btn btn-primary">Сделать снимок</button>
+    <button type="button" id="cancel" class="btn btn-ghost">Отмена</button>
+  </div>
+</div>
