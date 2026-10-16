@@ -234,3 +234,16 @@ class ReminderTests(TestCase):
             self.assertEqual(notify_overdue_tasks(at(10, 31)), 1)
             self.assertEqual(notify_overdue_tasks(at(10, 40)), 0)
         self.assertIn("срок был 10:30", notify.call_args.args[1])
+
+
+class DemoSetupTests(TestCase):
+    def test_demo_setup_is_repeatable(self):
+        from django.core.management import call_command
+        out = io.StringIO()
+        call_command("demo_setup", "--lat", "43.2", "--lon", "76.9", stdout=out)
+        call_command("demo_setup", "--lat", "43.3", "--lon", "76.9", stdout=out)
+        self.assertEqual(Point.objects.count(), 1)
+        self.assertEqual(float(Point.objects.get().latitude), 43.3)
+        admin = User.objects.get(username="87000000001")
+        self.assertTrue(admin.check_password("demo12345"))
+        self.assertEqual(admin.points.count(), 1)
