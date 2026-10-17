@@ -5,13 +5,13 @@ from .models import Point
 
 @admin.register(Point)
 class PointAdmin(admin.ModelAdmin):
-    list_display = ("name", "address", "radius_m", "day_shift_start", "night_shift_start", "late_grace_minutes", "is_active")
+    list_display = ("name", "address", "require_location", "radius_m", "day_shift_start", "night_shift_start", "late_grace_minutes", "is_active")
     list_filter = ("is_active",)
     search_fields = ("name", "address")
     fieldsets = (
         (None, {"fields": ("name", "address", "toilets_count", "is_active")}),
         ("Территория", {
-            "fields": ("latitude", "longitude", "radius_m"),
+            "fields": ("require_location", "latitude", "longitude", "radius_m"),
             "description": "Координаты входа: в 2ГИС или Google Maps нажмите на место правой кнопкой "
                            "и скопируйте два числа, например 43.238949, 76.889709.",
         }),

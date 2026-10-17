@@ -1,9 +1,11 @@
-// Кнопка «Я пришёл на смену»: геолокация → селфи → отправка на сервер.
-// Решение принимает сервер: телефон только сообщает, где он, и присылает снимок.
+// Кнопка «Я пришёл на смену»: (геолокация, если точка её требует) → селфи → отправка на сервер.
+// Решение принимает сервер: телефон только присылает снимок и, при необходимости, координаты.
 (function () {
   const button = document.getElementById("checkin-btn");
   const statusBox = document.getElementById("status");
+  const pointSelect = document.getElementById("point-select");
   const csrf = document.querySelector("[name=csrfmiddlewaretoken]").value;
+  const locationPoints = (button.dataset.locationPoints || "").split(",").filter(Boolean);
 
   function showStatus(text, kind) {
     statusBox.textContent = text;
@@ -33,11 +35,14 @@
     });
   }
 
-  async function send(position, photo) {
+  async function send(pointId, position, photo) {
     const body = new FormData();
-    body.append("latitude", position.coords.latitude);
-    body.append("longitude", position.coords.longitude);
-    body.append("accuracy", position.coords.accuracy);
+    if (pointId) body.append("point", pointId);
+    if (position) {
+      body.append("latitude", position.coords.latitude);
+      body.append("longitude", position.coords.longitude);
+      body.append("accuracy", position.coords.accuracy);
+    }
     body.append("selfie", photo, "selfie.jpg");
     const response = await fetch(button.dataset.url, {
       method: "POST",
@@ -50,10 +55,19 @@
 
   button.addEventListener("click", async () => {
     statusBox.hidden = true;
-    setBusy(true, "Определяем местоположение…");
-    let position, photo;
+    const pointId = pointSelect ? pointSelect.value : button.dataset.point;
+    if (pointSelect && !pointId) {
+      showStatus("Сначала выберите точку, на которой вы сегодня работаете.", "warn");
+      return;
+    }
+    const needLocation = locationPoints.includes(String(pointId));
+    let position = null, photo;
     try {
-      position = await getPosition();
+      if (needLocation) {
+        setBusy(true, "Определяем местоположение…");
+        position = await getPosition();
+      }
+      setBusy(true, "Делаем селфи…");
       photo = await OTCamera.capture({ title: "Селфи для отметки", facing: "user" });
     } catch (e) {
       if (!e.cancelled) showStatus(e.message, "error");
@@ -62,7 +76,7 @@
     }
     setBusy(true, "Проверяем отметку…");
     try {
-      const result = await send(position, photo);
+      const result = await send(pointId, position, photo);
       if (["ok", "late", "already"].includes(result.status)) {
         window.location.reload();
         return;

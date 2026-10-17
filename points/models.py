@@ -1,5 +1,6 @@
 from datetime import time
 
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
@@ -13,12 +14,16 @@ class Point(models.Model):
     # Координаты входа в ресторан. Проще всего взять из 2ГИС или Google Maps:
     # правый клик по точке на карте → скопировать координаты.
     latitude = models.DecimalField(
-        "Широта", max_digits=9, decimal_places=6,
+        "Широта", max_digits=9, decimal_places=6, null=True, blank=True,
         validators=[MinValueValidator(-90), MaxValueValidator(90)],
     )
     longitude = models.DecimalField(
-        "Долгота", max_digits=9, decimal_places=6,
+        "Долгота", max_digits=9, decimal_places=6, null=True, blank=True,
         validators=[MinValueValidator(-180), MaxValueValidator(180)],
+    )
+    require_location = models.BooleanField(
+        "Проверять территорию", default=False,
+        help_text="Если включено, кнопка «Я пришёл» работает только в радиусе точки (нужна геолокация телефона)",
     )
     radius_m = models.PositiveIntegerField(
         "Радиус территории, м", default=100,
@@ -47,3 +52,11 @@ class Point(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+    @property
+    def has_coordinates(self) -> bool:
+        return self.latitude is not None and self.longitude is not None
+
+    def clean(self):
+        if self.require_location and not self.has_coordinates:
+            raise ValidationError("Чтобы проверять территорию, укажите широту и долготу точки.")

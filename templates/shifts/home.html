@@ -20,8 +20,20 @@
 
   {% if points %}
     {% csrf_token %}
-    <button id="checkin-btn" class="btn btn-primary btn-big" data-url="{% url 'checkin' %}">Я пришёл на смену</button>
-    <p class="hint">Приложение проверит, что вы в ресторане, и попросит селфи. Разрешите доступ к геолокации и камере.</p>
+    {% if points|length > 1 %}
+      <label class="field-label" for="point-select">Где вы сегодня работаете?</label>
+      <select id="point-select" class="select-big">
+        <option value="">— выберите точку —</option>
+        {% for p in points %}<option value="{{ p.id }}">«{{ p.name }}»</option>{% endfor %}
+      </select>
+    {% endif %}
+    <button id="checkin-btn" class="btn btn-primary btn-big" data-url="{% url 'checkin' %}"
+            data-point="{% if points|length == 1 %}{{ points.0.id }}{% endif %}"
+            data-location-points="{{ location_point_ids }}">Я пришёл на смену</button>
+    <p class="hint">
+      {% if location_point_ids %}Приложение проверит, что вы в ресторане, и попросит селфи. Разрешите доступ к геолокации и камере.
+      {% else %}Приложение попросит селфи. Разрешите доступ к камере.{% endif %}
+    </p>
     <div id="status" class="alert" hidden></div>
     {% include "partials/camera_sheet.html" %}
   {% else %}

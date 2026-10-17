@@ -41,6 +41,8 @@ def home(request):
         "points": points,
         "upcoming": upcoming,
         "upcoming_name": dict(Shift.Kind.choices)[upcoming.kind] if upcoming else None,
+        # Точки, где кнопка «Я пришёл» спрашивает геолокацию
+        "location_point_ids": ",".join(str(p.id) for p in points if p.require_location),
         "late_form": LateReasonForm() if shift and shift.needs_late_reason else None,
         "tabs": acceptance_tabs(shift) if shift else [],
         "tasks": list(open_tasks(shift.point)) if shift else [],
@@ -84,7 +86,7 @@ def checkin(request):
     data = form.cleaned_data
     result = perform_checkin(
         request.user, data["latitude"], data["longitude"], data["accuracy"], data["selfie"],
-        ip=client_ip(request),
+        point_id=data["point"], ip=client_ip(request),
     )
     return JsonResponse({
         "status": result.status,

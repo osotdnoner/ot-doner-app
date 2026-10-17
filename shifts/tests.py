@@ -75,8 +75,12 @@ class RulesTests(TestCase):
 
 @override_settings(MEDIA_ROOT="/tmp/otdoner-test-media")
 class CheckinTests(TestCase):
+    """Точка с включённой проверкой территории."""
+
     def setUp(self):
-        self.point = Point.objects.create(name="27", latitude=POINT_LAT, longitude=POINT_LON, radius_m=100)
+        self.point = Point.objects.create(
+            name="27", latitude=POINT_LAT, longitude=POINT_LON, radius_m=100, require_location=True,
+        )
         self.admin = User.objects.create_user("87010000001", password="test12345", first_name="Ислам")
         self.admin.points.add(self.point)
 
@@ -128,6 +132,61 @@ class CheckinTests(TestCase):
     def test_admin_without_points(self):
         self.admin.points.clear()
         self.assertEqual(self.checkin().status, "no_point")
+
+    def test_location_required_but_not_sent(self):
+        result = perform_checkin(self.admin, None, None, None, fake_selfie(), now=at(9, 55))
+        self.assertEqual(result.status, "need_location")
+        self.assertFalse(Shift.objects.exists())
+        self.assertEqual(CheckinAttempt.objects.get().result, "no_location")
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media")
+class CheckinWithoutTerritoryTests(TestCase):
+    """Проверка территории выключена (так по умолчанию): достаточно селфи."""
+
+    def setUp(self):
+        self.point = Point.objects.create(name="27")
+        self.admin = User.objects.create_user("87010000001", password="test12345")
+        self.admin.points.add(self.point)
+
+    def test_selfie_is_enough(self):
+        result = perform_checkin(self.admin, None, None, None, fake_selfie(), now=at(10, 5))
+        self.assertEqual(result.status, "late")
+        self.assertEqual(result.shift.late_minutes, 5)
+        self.assertIsNone(result.shift.distance_m)
+        self.assertIsNone(result.shift.latitude)
+
+    def test_far_away_is_fine_when_check_is_off(self):
+        result = perform_checkin(self.admin, FAR_LAT, FAR_LON, 20, fake_selfie(), now=at(9, 55))
+        self.assertEqual(result.status, "ok")
+
+    def test_several_points_need_a_choice(self):
+        second = Point.objects.create(name="Астана")
+        self.admin.points.add(second)
+        result = perform_checkin(self.admin, None, None, None, fake_selfie(), now=at(9, 55))
+        self.assertEqual(result.status, "choose_point")
+        result = perform_checkin(self.admin, None, None, None, fake_selfie(), point_id=second.id, now=at(9, 55))
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.shift.point, second)
+
+    def test_foreign_point_is_rejected(self):
+        foreign = Point.objects.create(name="Чужая")
+        result = perform_checkin(self.admin, None, None, None, fake_selfie(), point_id=foreign.id, now=at(9, 55))
+        self.assertEqual(result.status, "no_point")
+
+    def test_view_accepts_selfie_without_coordinates(self):
+        self.client.login(username="87010000001", password="test12345")
+        with mock.patch("shifts.services.timezone.now", return_value=at(9, 50)):
+            response = self.client.post(reverse("checkin"), {"selfie": fake_selfie()})
+        self.assertEqual(response.json()["status"], "ok")
+        page = self.client.get(reverse("home"))
+        self.assertNotContains(page, "геолокаци")
+
+    def test_point_needs_coordinates_to_check_territory(self):
+        from django.core.exceptions import ValidationError
+        self.point.require_location = True
+        with self.assertRaises(ValidationError):
+            self.point.full_clean()
 
 
 @override_settings(MEDIA_ROOT="/tmp/otdoner-test-media")
@@ -240,10 +299,12 @@ class DemoSetupTests(TestCase):
     def test_demo_setup_is_repeatable(self):
         from django.core.management import call_command
         out = io.StringIO()
-        call_command("demo_setup", "--lat", "43.2", "--lon", "76.9", stdout=out)
-        call_command("demo_setup", "--lat", "43.3", "--lon", "76.9", stdout=out)
+        call_command("demo_setup", stdout=out)
+        self.assertFalse(Point.objects.get().require_location)
+        call_command("demo_setup", "--lat", "43.3", "--lon", "76.9", "--check-territory", stdout=out)
         self.assertEqual(Point.objects.count(), 1)
         self.assertEqual(float(Point.objects.get().latitude), 43.3)
+        self.assertTrue(Point.objects.get().require_location)
         admin = User.objects.get(username="87000000001")
         self.assertTrue(admin.check_password("demo12345"))
         self.assertEqual(admin.points.count(), 1)

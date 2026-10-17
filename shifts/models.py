@@ -23,10 +23,11 @@ class Shift(models.Model):
 
     # Всё ниже записывает сервер в момент отметки — телефон эти данные не задаёт
     checked_in_at = models.DateTimeField("Отметился (время сервера)")
-    latitude = models.DecimalField("Широта", max_digits=9, decimal_places=6)
-    longitude = models.DecimalField("Долгота", max_digits=9, decimal_places=6)
-    accuracy_m = models.FloatField("Точность GPS, м")
-    distance_m = models.FloatField("Расстояние до точки, м")
+    # Координаты есть, только если у точки включена проверка территории
+    latitude = models.DecimalField("Широта", max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField("Долгота", max_digits=9, decimal_places=6, null=True, blank=True)
+    accuracy_m = models.FloatField("Точность GPS, м", null=True, blank=True)
+    distance_m = models.FloatField("Расстояние до точки, м", null=True, blank=True)
     selfie = models.ImageField("Селфи", upload_to="selfies/%Y/%m/%d/")
 
     late_minutes = models.PositiveIntegerField("Опоздание, мин", default=0)
@@ -72,6 +73,7 @@ class CheckinAttempt(models.Model):
         NO_SLOT = "no_slot", "Нет смены в это время"
         ALREADY = "already", "Уже отмечен"
         NO_POINT = "no_point", "Нет закреплённых точек"
+        NO_LOCATION = "no_location", "Нет геолокации"
 
     admin = models.ForeignKey(
         settings.AUTH_USER_MODEL, verbose_name="Администратор", on_delete=models.CASCADE, related_name="checkin_attempts",

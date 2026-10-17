@@ -92,15 +92,28 @@ class CheckinResult:
     distance_m: float | None = None
 
 
-def perform_checkin(user, lat: float, lon: float, accuracy: float, selfie, *,
-                    now: datetime | None = None, ip: str | None = None) -> CheckinResult:
-    """Принимает или отклоняет отметку. Каждая попытка записывается в журнал."""
+def perform_checkin(user, lat: float | None, lon: float | None, accuracy: float | None, selfie, *,
+                    point_id: int | None = None, now: datetime | None = None, ip: str | None = None) -> CheckinResult:
+    """
+    Принимает или отклоняет отметку. Каждая попытка записывается в журнал.
+
+    Территория проверяется, только если у точки включена галочка «Проверять территорию».
+    Иначе для отметки достаточно селфи, а координаты не нужны.
+    """
     now = now or timezone.now()
     points = list(user.points.filter(is_active=True))
+    has_location = lat is not None and lon is not None
+
+    def dist_to(p):
+        if not has_location or not p.has_coordinates:
+            return None
+        return distance_m(lat, lon, float(p.latitude), float(p.longitude))
 
     def log(result: str, point=None, dist=None):
         CheckinAttempt.objects.create(
-            admin=user, point=point, latitude=round(lat, 6), longitude=round(lon, 6),
+            admin=user, point=point,
+            latitude=round(lat, 6) if has_location else None,
+            longitude=round(lon, 6) if has_location else None,
             accuracy_m=accuracy, distance_m=dist, result=result, ip_address=ip,
         )
 
@@ -108,28 +121,39 @@ def perform_checkin(user, lat: float, lon: float, accuracy: float, selfie, *,
         log(CheckinAttempt.Result.NO_POINT)
         return CheckinResult("no_point", "Вы не закреплены ни за одной точкой. Обратитесь к управляющему.")
 
-    # Ближайшая из точек, где работает этот администратор
-    point, dist = min(
-        ((p, distance_m(lat, lon, float(p.latitude), float(p.longitude))) for p in points),
-        key=lambda pair: pair[1],
-    )
+    # На какую точку отмечаемся
+    if point_id is not None:
+        point = next((p for p in points if p.id == point_id), None)
+        if point is None:
+            return CheckinResult("no_point", "Эта точка вам не назначена.")
+    elif len(points) == 1:
+        point = points[0]
+    elif has_location and any(p.has_coordinates for p in points):
+        point = min((p for p in points if p.has_coordinates), key=dist_to)
+    else:
+        return CheckinResult("choose_point", "Выберите точку, на которой вы сегодня работаете.")
+    dist = dist_to(point)
 
-    if accuracy > settings.CHECKIN_MAX_ACCURACY_M:
-        log(CheckinAttempt.Result.LOW_ACCURACY, point, dist)
-        return CheckinResult(
-            "low_accuracy",
-            f"Телефон определяет место неточно (±{accuracy:.0f} м). "
-            "Подойдите ближе к окну или выходу и попробуйте ещё раз.",
-            point=point, distance_m=dist,
-        )
-
-    if dist > point.radius_m:
-        log(CheckinAttempt.Result.OUTSIDE, point, dist)
-        return CheckinResult(
-            "outside",
-            f"Вы не на территории ресторана. До точки «{point.name}» — {format_distance(dist)}.",
-            point=point, distance_m=dist,
-        )
+    if point.require_location:
+        if not has_location or accuracy is None:
+            log(CheckinAttempt.Result.NO_LOCATION, point)
+            return CheckinResult(
+                "need_location",
+                "На этой точке нужна геолокация. Разрешите её для сайта в настройках браузера и попробуйте снова.",
+                point=point,
+            )
+        if accuracy > settings.CHECKIN_MAX_ACCURACY_M:
+            log(CheckinAttempt.Result.LOW_ACCURACY, point, dist)
+            return CheckinResult(
+                "low_accuracy",
+                f"Телефон определяет место неточно (±{accuracy:.0f} м). "
+                "Подойдите ближе к окну или выходу и попробуйте ещё раз.",
+                point=point, distance_m=dist,
+            )
+        if dist is None or dist > point.radius_m:
+            log(CheckinAttempt.Result.OUTSIDE, point, dist)
+            where = f" До точки «{point.name}» — {format_distance(dist)}." if dist is not None else ""
+            return CheckinResult("outside", f"Вы не на территории ресторана.{where}", point=point, distance_m=dist)
 
     slot = current_slot(point, now)
     if slot is None:
@@ -146,8 +170,9 @@ def perform_checkin(user, lat: float, lon: float, accuracy: float, selfie, *,
         with transaction.atomic():
             shift = Shift.objects.create(
                 point=point, admin=user, kind=slot.kind,
-                planned_start=slot.start, planned_end=slot.end,
-                checked_in_at=now, latitude=round(lat, 6), longitude=round(lon, 6),
+                planned_start=slot.start, planned_end=slot.end, checked_in_at=now,
+                latitude=round(lat, 6) if has_location else None,
+                longitude=round(lon, 6) if has_location else None,
                 accuracy_m=accuracy, distance_m=dist, selfie=selfie, late_minutes=late,
             )
     except IntegrityError:  # двойное нажатие кнопки

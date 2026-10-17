@@ -201,3 +201,8 @@ h1 { font-size: 26px; margin: 4px 0 12px; }
   position: sticky; bottom: 0; padding: 12px 0 calc(12px + env(safe-area-inset-bottom));
   background: linear-gradient(to top, var(--bg) 70%, transparent); margin-top: 20px;
 }
+
+.select-big {
+  width: 100%; font: inherit; font-size: 17px; padding: 14px; border-radius: 14px; border: 1px solid var(--line);
+  background: var(--card); color: var(--ink); margin-bottom: 14px;
+}

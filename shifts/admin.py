@@ -42,7 +42,7 @@ class ShiftAdmin(admin.ModelAdmin):
 
     @admin.display(description="До точки")
     def distance(self, obj):
-        return f"{obj.distance_m:.0f} м"
+        return f"{obj.distance_m:.0f} м" if obj.distance_m is not None else "не проверялось"
 
     @admin.display(description="Селфи")
     def selfie_thumb(self, obj):
@@ -58,6 +58,8 @@ class ShiftAdmin(admin.ModelAdmin):
 
     @admin.display(description="Где отметился")
     def map_link(self, obj):
+        if obj.latitude is None:
+            return "территория не проверялась"
         return format_html(
             '<a href="https://www.google.com/maps?q={},{}" target="_blank" rel="noopener">Открыть на карте</a>',
             obj.latitude, obj.longitude,
