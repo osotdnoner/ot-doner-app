@@ -28,8 +28,12 @@ class Command(BaseCommand):
         parser.add_argument("--lon", type=float, help="Долгота, например 76.889709")
         parser.add_argument("--radius", type=int, default=500, help="Радиус территории в метрах (для пробы — побольше)")
         parser.add_argument("--check-territory", action="store_true", help="Включить проверку территории")
+        parser.add_argument("--if-empty", action="store_true", help="Ничего не делать, если точки уже есть")
 
     def handle(self, *args, **opts):
+        if opts["if_empty"] and Point.objects.exists():
+            self.stdout.write("Точки уже есть — тестовые данные не нужны.")
+            return
         if opts["check_territory"] and (opts["lat"] is None or opts["lon"] is None):
             raise CommandError("Для проверки территории укажите --lat и --lon")
         point, _ = Point.objects.update_or_create(
