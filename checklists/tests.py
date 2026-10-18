@@ -92,14 +92,14 @@ class ChecklistServiceTests(TestCase):
             answer_item(self.run, self.item("Чистота зала"), 0, status=Status.DEVIATION, photo=fake_selfie(), user=self.admin)
 
     def test_critical_problem_sets_critical_and_notifies(self):
-        with mock.patch("checklists.services.notify_point_managers") as notify:
+        with mock.patch("checklists.services.notify") as notify:
             result = answer_item(
                 self.run, self.item("Расходники", "Санузлы"), 2, status=Status.DEVIATION, problem="Нет мыла",
                 photo=fake_selfie(), user=self.admin,
             )
         self.assertEqual(result.status, Status.CRITICAL)
         self.assertTrue(Task.objects.get().is_critical)
-        self.assertIn("Санузел 2: Расходники — Нет мыла", notify.call_args.args[1])
+        self.assertIn("Санузел 2: Расходники — Нет мыла", notify.call_args.args[3])
 
     def test_answer_with_task_cannot_be_changed(self):
         item = self.item("Чистота зала")
@@ -119,18 +119,18 @@ class ChecklistServiceTests(TestCase):
         self.assertEqual(check.uniform_missing, "Фартук, Бейдж")
 
     def test_absent_employee_notifies_manager(self):
-        with mock.patch("checklists.services.notify_point_managers") as notify:
+        with mock.patch("checklists.services.notify") as notify:
             check = answer_staff(self.run, self.cleaner, attendance="absent", user=self.admin)
         self.assertIsNone(check.uniform_ok)
-        self.assertIn("не вышел", notify.call_args.args[1])
+        self.assertIn("не вышел", notify.call_args.args[2])
 
     def test_not_admitted_is_critical(self):
-        with mock.patch("checklists.services.notify_point_managers") as notify:
+        with mock.patch("checklists.services.notify") as notify:
             answer_staff(
                 self.run, self.cashier, attendance="present", uniform_ok=True, not_admitted=True,
                 comment="Температура, кашель", photo=fake_selfie(), user=self.admin,
             )
-        self.assertIn("КРИТИЧНО", notify.call_args.args[1])
+        self.assertIn("КРИТИЧНО", notify.call_args.args[2])
 
     def complete_everything(self):
         for view in build_view(self.run):
@@ -151,6 +151,52 @@ class ChecklistServiceTests(TestCase):
         self.complete_everything()
         finish_run(self.run, now=self.run.started_at + timedelta(seconds=30))
         self.assertTrue(self.run.too_fast)
+
+    def complete_the_rest(self):
+        for view in build_view(self.run):
+            for entry in view.entries:
+                if not entry.result:
+                    answer_item(self.run, entry.item, entry.toilet_no, status=Status.OK, photo=fake_selfie(), user=self.admin)
+            for employee, check in view.staff:
+                if not check:
+                    answer_staff(self.run, employee, attendance="present", uniform_ok=True, user=self.admin)
+
+    def test_finish_sends_one_summary_with_all_problems(self):
+        from notifications.models import Notification
+        boss = User.objects.create_user("87010000005", role=User.Role.OWNER, telegram_chat_id="555")
+        answer_item(self.run, self.item("Освещение"), 0, status=Status.DEVIATION, problem="Не горит лампа",
+                    photo=fake_selfie(), responsible=self.cleaner, deadline_minutes=30, user=self.admin)
+        answer_staff(self.run, self.cleaner, attendance="absent", user=self.admin)
+        answer_staff(self.run, self.cashier, attendance="late", uniform_ok=False, missing=["Фартук"],
+                     photo=fake_selfie(), user=self.admin)
+        self.complete_the_rest()
+        finish_run(self.run, now=self.run.started_at + timedelta(minutes=12))
+
+        summary = Notification.objects.get(event=Notification.Event.PROBLEMS)
+        self.assertEqual((summary.recipient, summary.title), (boss, "Неполадки: Осмотр зала"))
+        self.assertIn("Неполадок: 4.", summary.text)
+        self.assertIn("• Освещение — Не горит лампа (устраняет Гульнар, до ", summary.text)
+        self.assertIn("• Гульнар (", summary.text)
+        self.assertIn(") не вышел на смену", summary.text)
+        self.assertIn(") опоздал", summary.text)
+        self.assertIn(": нарушение формы — Фартук", summary.text)
+        self.assertNotIn("быстро", summary.text)
+
+    def test_no_summary_when_everything_is_fine(self):
+        from notifications.models import Notification
+        User.objects.create_user("87010000005", role=User.Role.OWNER, telegram_chat_id="555")
+        self.complete_everything()
+        finish_run(self.run, now=self.run.started_at + timedelta(minutes=12))
+        self.assertFalse(Notification.objects.filter(event=Notification.Event.PROBLEMS).exists())
+
+    def test_too_fast_is_reported_even_without_problems(self):
+        from notifications.models import Notification
+        User.objects.create_user("87010000005", role=User.Role.OWNER, telegram_chat_id="555")
+        self.complete_everything()
+        finish_run(self.run, now=self.run.started_at + timedelta(seconds=30))
+        summary = Notification.objects.get(event=Notification.Event.PROBLEMS)
+        self.assertEqual(summary.title, "Слишком быстрая проверка: Осмотр зала")
+        self.assertIn("подозрительно быстро", summary.text)
 
     def test_finished_run_is_locked(self):
         self.complete_everything()

@@ -13,6 +13,7 @@ from django.urls import reverse
 from PIL import Image
 
 from accounts.models import User
+from notifications.models import Notification
 from points.models import Point
 
 from .models import CheckinAttempt, Shift
@@ -229,35 +230,19 @@ class ViewsTests(TestCase):
         with mock.patch("shifts.services.timezone.now", return_value=at(10, 15)):
             self.assertEqual(self.post_checkin().json()["status"], "late")
         shift = Shift.objects.get()
-        with mock.patch("shifts.views.notify_point_managers") as notify:
-            response = self.client.post(reverse("late_reason", args=[shift.id]), {"reason": "Пробка на Абая"})
+        response = self.client.post(reverse("late_reason", args=[shift.id]), {"reason": "Пробка на Абая"})
         self.assertRedirects(response, reverse("home"), fetch_redirect_response=False)
         shift.refresh_from_db()
         self.assertEqual(shift.late_reason, "Пробка на Абая")
-        text = notify.call_args.args[1]
-        self.assertIn("10:15", text)
-        self.assertIn("опоздание 15 мин", text)
+        self.assertTrue(shift.late_notified)
+        message = Notification.objects.get(event=Notification.Event.LATE)
+        self.assertEqual((message.recipient, message.channel, message.address), (self.manager, "telegram", "111"))
+        self.assertIn("отметился в 10:15, опоздание 15 мин", message.text)
+        self.assertIn("Причина: Пробка на Абая", message.text)
 
     def test_manager_cannot_check_in(self):
         self.client.login(username="87010000002", password="test12345")
         self.assertEqual(self.post_checkin().status_code, 403)
-
-
-class TelegramTests(TestCase):
-    @override_settings(TELEGRAM_BOT_TOKEN="")
-    def test_without_token_message_goes_to_log(self):
-        from notifications.telegram import send_message
-        with self.assertLogs("otdoner.telegram", level="INFO") as logs:
-            self.assertFalse(send_message("111", "проверка"))
-        self.assertIn("проверка", logs.output[0])
-
-    @override_settings(TELEGRAM_BOT_TOKEN="test-token")
-    def test_with_token_calls_telegram_api(self):
-        from notifications.telegram import send_message
-        with mock.patch("notifications.telegram.requests.post") as post:
-            post.return_value.raise_for_status.return_value = None
-            self.assertTrue(send_message("111", "проверка"))
-        self.assertIn("/bottest-token/sendMessage", post.call_args.args[0])
 
 
 @override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", MISSED_CHECKIN_ALERT_MINUTES=10)
@@ -267,19 +252,34 @@ class ReminderTests(TestCase):
 
     def test_missed_checkin_is_reported_once(self):
         from shifts.management.commands.send_reminders import notify_missed_checkins
-        with mock.patch("shifts.management.commands.send_reminders.notify_point_managers") as notify:
+        with mock.patch("shifts.management.commands.send_reminders.notify") as notify:
             self.assertEqual(notify_missed_checkins(at(10, 5)), 0)   # ещё рано
             self.assertEqual(notify_missed_checkins(at(10, 12)), 1)
             self.assertEqual(notify_missed_checkins(at(10, 20)), 0)  # уже сообщили
-        self.assertIn("никто из администраторов не отметился", notify.call_args.args[1])
+        self.assertIn("никто из администраторов не отметился", notify.call_args.args[3])
 
     def test_no_report_when_admin_checked_in(self):
         from shifts.management.commands.send_reminders import notify_missed_checkins
         admin = User.objects.create_user("87010000001", password="x")
         admin.points.add(self.point)
         perform_checkin(admin, POINT_LAT, POINT_LON, 20, fake_selfie(), now=at(9, 58))
-        with mock.patch("shifts.management.commands.send_reminders.notify_point_managers"):
+        with mock.patch("shifts.management.commands.send_reminders.notify"):
             self.assertEqual(notify_missed_checkins(at(10, 12)), 0)
+
+    @override_settings(LATE_REASON_WAIT_MINUTES=10)
+    def test_late_without_reason_is_reported_once(self):
+        from shifts.management.commands.send_reminders import notify_late_without_reason
+        admin = User.objects.create_user("87010000001", password="x", first_name="Ислам")
+        admin.points.add(self.point)
+        boss = User.objects.create_user("87010000009", password="x", role=User.Role.OWNER, whatsapp_phone="77010000009")
+        perform_checkin(admin, POINT_LAT, POINT_LON, 20, fake_selfie(), now=at(10, 20))
+        self.assertEqual(notify_late_without_reason(at(10, 25)), 0)  # ещё ждём причину
+        self.assertEqual(notify_late_without_reason(at(10, 31)), 1)
+        self.assertEqual(notify_late_without_reason(at(10, 40)), 0)  # уже сообщили
+        message = Notification.objects.get(event=Notification.Event.LATE)
+        self.assertEqual((message.recipient, message.channel), (boss, "whatsapp"))
+        self.assertIn("опоздание 20 мин", message.text)
+        self.assertIn("Причину пока не указал", message.text)
 
     def test_overdue_task_is_reported_once(self):
         from checklists.models import Task
@@ -288,11 +288,11 @@ class ReminderTests(TestCase):
         admin.points.add(self.point)
         shift = perform_checkin(admin, POINT_LAT, POINT_LON, 20, fake_selfie(), now=at(9, 58)).shift
         Task.objects.create(point=self.point, shift=shift, title="Освещение — Не горит лампа", deadline=at(10, 30))
-        with mock.patch("shifts.management.commands.send_reminders.notify_point_managers") as notify:
+        with mock.patch("shifts.management.commands.send_reminders.notify") as notify:
             self.assertEqual(notify_overdue_tasks(at(10, 20)), 0)
             self.assertEqual(notify_overdue_tasks(at(10, 31)), 1)
             self.assertEqual(notify_overdue_tasks(at(10, 40)), 0)
-        self.assertIn("срок был 10:30", notify.call_args.args[1])
+        self.assertIn("срок был 10:30", notify.call_args.args[3])
 
 
 class DemoSetupTests(TestCase):

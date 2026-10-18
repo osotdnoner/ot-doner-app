@@ -15,6 +15,8 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from notifications.models import Notification
+from notifications.service import notify
 from points.models import Point
 
 from .models import CheckinAttempt, Shift
@@ -193,4 +195,20 @@ def current_shift_for(user, now: datetime | None = None) -> Shift | None:
         .select_related("point")
         .order_by("-planned_start")
         .first()
+    )
+
+
+def report_late(shift: Shift) -> int:
+    """Сообщает шефу об опоздании — с причиной, если администратор её уже указал."""
+    tz = ZoneInfo(shift.point.timezone)
+    start = timezone.localtime(shift.planned_start, tz)
+    came = timezone.localtime(shift.checked_in_at, tz)
+    reason = f"Причина: {shift.late_reason}" if shift.late_reason else "Причину пока не указал."
+    shift.late_notified = True
+    shift.save(update_fields=["late_notified"])
+    return notify(
+        shift.point, Notification.Event.LATE, "Опоздание администратора",
+        f"Точка «{shift.point}», {shift.get_kind_display().lower()} смена с {start:%H:%M}.\n"
+        f"Администратор {shift.admin} отметился в {came:%H:%M}, опоздание {shift.late_human}.\n"
+        f"{reason}",
     )

@@ -1,5 +1,4 @@
 from datetime import timedelta
-from zoneinfo import ZoneInfo
 
 from django.contrib.auth.decorators import login_required
 from django.http import HttpResponseForbidden, JsonResponse
@@ -9,11 +8,10 @@ from django.views.decorators.http import require_POST
 
 from checklists.models import ChecklistTemplate
 from checklists.services import open_tasks, progress
-from notifications.telegram import notify_point_managers
 
 from .forms import CheckinForm, LateReasonForm
 from .models import Shift
-from .services import current_shift_for, current_slot, perform_checkin
+from .services import current_shift_for, current_slot, perform_checkin, report_late
 
 
 def client_ip(request) -> str | None:
@@ -107,14 +105,7 @@ def late_reason(request, shift_id: int):
     if form.is_valid() and shift.needs_late_reason:
         shift.late_reason = form.cleaned_data["reason"]
         shift.save(update_fields=["late_reason"])
-        local_time = timezone.localtime(shift.checked_in_at, ZoneInfo(shift.point.timezone))
-        notify_point_managers(
-            shift.point,
-            f"Точка «{shift.point}», {shift.get_kind_display().lower()} смена.\n"
-            f"Администратор {request.user} отметился в {local_time:%H:%M}, "
-            f"опоздание {shift.late_human}.\n"
-            f"Причина: {shift.late_reason}",
-        )
+        report_late(shift)
         return redirect("home")
 
     return render(request, "shifts/home.html", {

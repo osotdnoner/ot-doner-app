@@ -32,6 +32,7 @@ class Shift(models.Model):
 
     late_minutes = models.PositiveIntegerField("Опоздание, мин", default=0)
     late_reason = models.TextField("Причина опоздания", blank=True)
+    late_notified = models.BooleanField("Об опоздании сообщено", default=False)
 
     status = models.CharField("Статус", max_length=10, choices=Status.choices, default=Status.OPEN)
 

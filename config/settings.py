@@ -6,6 +6,7 @@
 """
 
 import os
+import sys
 from pathlib import Path
 
 import dj_database_url
@@ -57,6 +58,7 @@ INSTALLED_APPS = [
     "shifts",    # смены и отметка «Я пришёл»
     "staff",     # сотрудники точек
     "checklists",  # чек-листы приёма смены, ответы, задачи
+    "notifications",  # сообщения в Telegram и WhatsApp
 ]
 
 MIDDLEWARE = [
@@ -148,6 +150,8 @@ CHECKIN_EARLY_MINUTES = int(os.getenv("CHECKIN_EARLY_MINUTES", 60))
 CHECKIN_MAX_ACCURACY_M = int(os.getenv("CHECKIN_MAX_ACCURACY_M", 150))
 # Через сколько минут после начала смены сообщать управляющему, что никто не отметился
 MISSED_CHECKIN_ALERT_MINUTES = int(os.getenv("MISSED_CHECKIN_ALERT_MINUTES", 10))
+# Если опоздавший администратор не указал причину за столько минут, сообщаем без причины
+LATE_REASON_WAIT_MINUTES = int(os.getenv("LATE_REASON_WAIT_MINUTES", 10))
 
 
 # --- Правила чек-листов ---------------------------------------------------
@@ -157,14 +161,26 @@ CHECKLIST_RANDOM_PHOTOS = int(os.getenv("CHECKLIST_RANDOM_PHOTOS", 2))
 CHECKLIST_MIN_SECONDS_PER_ITEM = int(os.getenv("CHECKLIST_MIN_SECONDS_PER_ITEM", 4))
 
 
-# --- Telegram --------------------------------------------------------------
-# Токен бота выдаёт @BotFather. Пока токена нет, сообщения пишутся в лог.
+# --- Уведомления: Telegram и WhatsApp --------------------------------------
+# Пока ключей нет, сообщения не отправляются, а пишутся в лог и в «Журнал сообщений» в панели.
+# Токен бота выдаёт @BotFather.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+# WhatsApp Business Platform (Cloud API от Meta): постоянный токен и ID номера отправителя
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+# Одобренный шаблон сообщения (см. README). Пусто — обычный текст, доходит только в течение 24 часов
+# после того, как получатель сам написал на номер компании.
+WHATSAPP_TEMPLATE = os.getenv("WHATSAPP_TEMPLATE", "otdoner_alert")
+WHATSAPP_TEMPLATE_LANG = os.getenv("WHATSAPP_TEMPLATE_LANG", "ru")
+WHATSAPP_API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v23.0")
+# Отправлять в фоне, чтобы администратор не ждал мессенджеры. В автотестах — сразу.
+NOTIFICATIONS_ASYNC = env_bool("NOTIFICATIONS_ASYNC", "test" not in sys.argv)
 
 
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "handlers": {"console": {"class": "logging.StreamHandler"}},
-    "loggers": {"otdoner": {"handlers": ["console"], "level": "INFO"}},
+    # В автотестах не засоряем вывод текстами сообщений
+    "loggers": {"otdoner": {"handlers": ["console"], "level": "WARNING" if "test" in sys.argv else "INFO"}},
 }

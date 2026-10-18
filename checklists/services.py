@@ -12,7 +12,8 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from notifications.telegram import notify_point_managers
+from notifications.models import Notification
+from notifications.service import notify
 from staff.models import Employee
 
 from .models import ChecklistTemplate, Item, ItemResult, Run, Section, StaffCheck, Status, Task
@@ -177,9 +178,9 @@ def answer_item(run: Run, item: Item, toilet_no: int, *, status: str, user, prob
 
     if status == Status.CRITICAL:
         who = f"Ответственный: {responsible}, срок {_local(task.deadline, point)}." if responsible else "Ответственный не назначен."
-        notify_point_managers(
-            point,
-            f"КРИТИЧНО · Точка «{point}»\n{task.title}\n"
+        notify(
+            point, Notification.Event.URGENT, "КРИТИЧНО: проблема в зале",
+            f"Точка «{point}»: {task.title}\n"
             f"Администратор: {user}. {who}" + (f"\nКомментарий: {comment}" if comment and problem else ""),
         )
     return result
@@ -220,16 +221,16 @@ def answer_staff(run: Run, employee: Employee, *, attendance: str, user, uniform
         check.photo = photo
         check.save(update_fields=["photo"])
 
+    position = employee.get_position_display().lower()
     if not_admitted:
-        notify_point_managers(
-            point,
-            f"КРИТИЧНО · Точка «{point}»\nСотрудник {employee} ({employee.get_position_display().lower()}) "
-            f"не допущен к работе.\nПричина: {comment}\nАдминистратор: {user}.",
+        notify(
+            point, Notification.Event.URGENT, "КРИТИЧНО: сотрудник не допущен к работе",
+            f"Точка «{point}»: {employee} ({position}).\nПричина: {comment}\nАдминистратор: {user}.",
         )
     elif attendance == StaffCheck.Attendance.ABSENT:
-        notify_point_managers(
-            point,
-            f"Точка «{point}»: сотрудник {employee} ({employee.get_position_display().lower()}) не вышел на смену.",
+        notify(
+            point, Notification.Event.URGENT, "Сотрудник не вышел на смену",
+            f"Точка «{point}»: {employee} ({position}).\nАдминистратор: {user}.",
         )
     return check
 
@@ -244,7 +245,60 @@ def finish_run(run: Run, now: datetime | None = None) -> Run:
     run.too_fast = total > 0 and seconds < total * settings.CHECKLIST_MIN_SECONDS_PER_ITEM
     run.finished_at = now
     run.save(update_fields=["finished_at", "too_fast"])
+    report_problems(run)
     return run
+
+
+def problem_lines(run: Run) -> list[str]:
+    """Все неполадки проверки — по строке на каждую."""
+    point = run.shift.point
+    lines = []
+    results = run.results.exclude(status=Status.OK).select_related("task__responsible").order_by("id")
+    for result in results:
+        line = f"• {result.label} — {result.problem or result.comment}"
+        if result.status == Status.CRITICAL:
+            line += " [КРИТИЧНО]"
+        task = getattr(result, "task", None)
+        if task and task.responsible:
+            line += f" (устраняет {task.responsible}, до {_local(task.deadline, point)})"
+        elif task:
+            line += " (ответственный не назначен)"
+        lines.append(line)
+
+    for check in run.staff_checks.select_related("employee").order_by("id"):
+        name = f"{check.employee} ({check.employee.get_position_display().lower()})"
+        if check.attendance == StaffCheck.Attendance.ABSENT:
+            lines.append(f"• {name} не вышел на смену")
+            continue
+        if check.attendance == StaffCheck.Attendance.LATE:
+            lines.append(f"• {name} опоздал")
+        if check.not_admitted:
+            lines.append(f"• {name} не допущен к работе: {check.comment} [КРИТИЧНО]")
+        elif check.uniform_ok is False:
+            lines.append(f"• {name}: нарушение формы — {check.uniform_missing or check.comment}")
+    return lines
+
+
+def report_problems(run: Run) -> int:
+    """Итог проверки шефу — одним сообщением, если есть неполадки или проверка пройдена слишком быстро."""
+    lines = problem_lines(run)
+    if not lines and not run.too_fast:
+        return 0
+    shift, point = run.shift, run.shift.point
+    minutes = max(1, round((run.finished_at - run.started_at).total_seconds() / 60))
+    header = (
+        f"Точка «{point}», {shift.get_kind_display().lower()} смена. "
+        f"Проверка «{run.template}» завершена в {_local(run.finished_at, point)}, администратор {shift.admin}."
+    )
+    body = [header]
+    if lines:
+        critical = sum("[КРИТИЧНО]" in line for line in lines)
+        body.append(f"Неполадок: {len(lines)}" + (f", из них критичных: {critical}." if critical else "."))
+        body += lines
+    if run.too_fast:
+        body.append(f"⚠ Пройдено подозрительно быстро: за {minutes} мин. Стоит перепроверить.")
+    title = f"Неполадки: {run.template}" if lines else f"Слишком быстрая проверка: {run.template}"
+    return notify(point, Notification.Event.PROBLEMS, title, "\n".join(body))
 
 
 def open_tasks(point):

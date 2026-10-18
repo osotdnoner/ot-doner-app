@@ -1,5 +1,5 @@
 """
-Уведомления в Telegram.
+Отправка в Telegram через бота.
 
 Пока в .env нет TELEGRAM_BOT_TOKEN, сообщения не отправляются, а пишутся в лог
 (их видно в окне, где запущен сервер). Ошибка Telegram никогда не ломает работу
@@ -11,35 +11,40 @@ import logging
 import requests
 from django.conf import settings
 
+from .outcome import Outcome
+
 logger = logging.getLogger("otdoner.telegram")
 
+# Понятные подсказки к частым ответам Telegram
+HINTS = {
+    "chat not found": "Проверьте chat ID и что человек написал боту /start.",
+    "bot can't initiate conversation": "Человек должен сначала открыть бота и нажать «Старт».",
+    "bot was blocked by the user": "Человек заблокировал бота — пусть разблокирует и нажмёт «Старт».",
+    "Unauthorized": "Неверный TELEGRAM_BOT_TOKEN.",
+}
 
-def send_message(chat_id: str, text: str) -> bool:
+
+def send_message(chat_id: str, text: str) -> Outcome:
     token = settings.TELEGRAM_BOT_TOKEN
-    if not token or not chat_id:
-        logger.info("[Telegram → %s] %s", chat_id or "получатель не указан", text)
-        return False
+    if not token:
+        logger.info("[Telegram → %s] %s", chat_id, text)
+        return Outcome(False, "Не задан TELEGRAM_BOT_TOKEN — сообщение только в логе сервера.", skipped=True)
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=5,
+            json={"chat_id": chat_id, "text": text[:4096]},
+            timeout=10,
         )
-        response.raise_for_status()
-        return True
-    except requests.RequestException:
-        logger.exception("Не удалось отправить сообщение в Telegram (chat_id=%s)", chat_id)
-        return False
+    except requests.RequestException as exc:
+        logger.warning("Нет связи с Telegram (chat_id=%s): %s", chat_id, exc)
+        return Outcome(False, f"Нет связи с Telegram: {exc.__class__.__name__}")
+    if response.ok:
+        return Outcome(True)
 
-
-def notify_point_managers(point, text: str) -> int:
-    """Отправляет сообщение управляющим точки. Возвращает, скольким ушло."""
-    from accounts.models import User
-
-    managers = User.objects.filter(points=point, role=User.Role.MANAGER, is_active=True)
-    sent = 0
-    for manager in managers:
-        sent += send_message(manager.telegram_chat_id, text)
-    if not managers:
-        logger.info("[Telegram] У точки «%s» нет управляющего. Сообщение: %s", point, text)
-    return sent
+    try:
+        description = response.json().get("description", "")
+    except ValueError:
+        description = response.text[:200]
+    hint = next((h for key, h in HINTS.items() if key in description), "")
+    logger.warning("Telegram отказал (chat_id=%s): %s", chat_id, description)
+    return Outcome(False, f"Telegram: {description}. {hint}".strip())
