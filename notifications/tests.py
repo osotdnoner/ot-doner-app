@@ -180,3 +180,84 @@ class PanelTests(TestCase):
                                     state=State.SKIPPED, error="Нет ключа")
         response = self.client.get(reverse("admin:notifications_notification_changelist"))
         self.assertContains(response, "Нет ключа")
+
+
+def telegram_api(username="otdoner_alerts_bot", updates=None, send_ok=True):
+    """Поддельный Telegram: отвечает на getMe, getUpdates и sendMessage."""
+    def fake_post(url, json=None, timeout=None):
+        method = url.rsplit("/", 1)[-1]
+        if method == "getMe":
+            return api_response(payload={"ok": True, "result": {"username": username}})
+        if method == "getUpdates":
+            return api_response(payload={"ok": True, "result": updates or []})
+        if send_ok:
+            return api_response(payload={"ok": True, "result": {}})
+        return api_response(403, {"ok": False, "description": "Forbidden: bot was blocked by the user"})
+    return mock.patch("notifications.telegram.requests.post", side_effect=fake_post)
+
+
+@override_settings(TELEGRAM_BOT_TOKEN="test-token", WHATSAPP_TOKEN="", WHATSAPP_PHONE_NUMBER_ID="")
+class TelegramConnectTests(TestCase):
+    def setUp(self):
+        telegram._usernames.clear()
+        self.boss = User.objects.create_user("87000000000", password="test12345", first_name="Шеф",
+                                             role=User.Role.OWNER)
+        self.client.login(username="87000000000", password="test12345")
+
+    def start_update(self, text, chat_id=777, update_id=1):
+        return {"update_id": update_id, "message": {"text": text, "chat": {"id": chat_id}}}
+
+    def test_manager_home_shows_connect_card(self):
+        page = self.client.get(reverse("home"))
+        self.assertContains(page, "Уведомления в Telegram")
+        self.assertContains(page, "Подключить")
+
+    def test_page_shows_personal_link(self):
+        with telegram_api():
+            page = self.client.get(reverse("telegram"))
+        self.assertContains(page, f"https://t.me/otdoner_alerts_bot?start={telegram.link_code(self.boss)}")
+        self.assertContains(page, "Не подключено")
+
+    @override_settings(TELEGRAM_BOT_TOKEN="")
+    def test_page_explains_missing_token(self):
+        page = self.client.get(reverse("telegram"))
+        self.assertContains(page, "не задан TELEGRAM_BOT_TOKEN")
+
+    def test_wrong_token_is_explained(self):
+        with mock.patch("notifications.telegram.requests.post",
+                        return_value=api_response(401, {"ok": False, "error_code": 401, "description": "Unauthorized"})):
+            page = self.client.get(reverse("telegram"))
+        self.assertContains(page, "Telegram не принял токен бота")
+
+    def test_check_saves_chat_id_and_sends_test(self):
+        code = telegram.link_code(self.boss)
+        updates = [self.start_update("привет", chat_id=111), self.start_update(f"/start {code}", chat_id=777, update_id=2)]
+        with telegram_api(updates=updates) as post:
+            response = self.client.post(reverse("telegram_check"), follow=True)
+        self.boss.refresh_from_db()
+        self.assertEqual(self.boss.telegram_chat_id, "777")
+        self.assertContains(response, "проверочное сообщение отправлено")
+        sent = [c for c in post.call_args_list if c.args[0].endswith("/sendMessage")]
+        self.assertEqual(sent[0].kwargs["json"]["chat_id"], "777")
+        self.assertContains(response, "Подключено")
+
+    def test_someone_elses_code_does_not_match(self):
+        other = User.objects.create_user("87000000005", role=User.Role.MANAGER)
+        with telegram_api(updates=[self.start_update(f"/start {telegram.link_code(other)}")]):
+            response = self.client.post(reverse("telegram_check"), follow=True)
+        self.boss.refresh_from_db()
+        self.assertEqual(self.boss.telegram_chat_id, "")
+        self.assertContains(response, "Бот пока не получил ваше «Старт»")
+
+    def test_send_error_is_shown(self):
+        self.boss.telegram_chat_id = "777"
+        self.boss.save()
+        with telegram_api(send_ok=False), self.assertLogs("otdoner"):
+            response = self.client.post(reverse("telegram_test"), follow=True)
+        self.assertContains(response, "сообщение не ушло")
+        self.assertContains(response, "заблокировал бота")
+
+    def test_shift_admin_is_sent_home(self):
+        User.objects.create_user("87000000001", password="test12345")
+        self.client.login(username="87000000001", password="test12345")
+        self.assertRedirects(self.client.get(reverse("telegram")), reverse("home"), fetch_redirect_response=False)

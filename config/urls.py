@@ -6,6 +6,7 @@ from django.urls import path, re_path
 from django.views.static import serve as serve_file
 
 from checklists import views as checklist_views
+from notifications import views as notification_views
 from shifts import views as shift_views
 
 admin.site.site_header = "ОТ Донер — управление"
@@ -21,6 +22,9 @@ urlpatterns = [
     path("run/<int:run_id>/staff/<int:employee_id>/", checklist_views.answer_staff_view, name="answer_staff"),
     path("run/<int:run_id>/finish/", checklist_views.finish_view, name="finish_run"),
     path("task/<int:task_id>/close/", checklist_views.close_task_view, name="close_task"),
+    path("telegram/", notification_views.telegram_page, name="telegram"),
+    path("telegram/check/", notification_views.telegram_check, name="telegram_check"),
+    path("telegram/test/", notification_views.telegram_test, name="telegram_test"),
     path("login/", auth_views.LoginView.as_view(redirect_authenticated_user=True), name="login"),
     path("logout/", auth_views.LogoutView.as_view(), name="logout"),
     path("panel/", admin.site.urls),

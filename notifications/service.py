@@ -136,10 +136,12 @@ def retry_unsent(now=None) -> int:
     return count
 
 
-def send_test(user) -> list[tuple[str, Outcome]]:
-    """Тестовое сообщение человеку во все его мессенджеры — для кнопки в панели."""
+def send_test(user, channels: list[str] | None = None) -> list[tuple[str, Outcome]]:
+    """Тестовое сообщение человеку во все его мессенджеры (или только в указанные)."""
     results = []
     for channel, address in user.notification_addresses():
+        if channels and channel not in channels:
+            continue
         notification = Notification.objects.create(
             event=Event.TEST, recipient=user, channel=channel, address=address,
             title="Проверка связи",

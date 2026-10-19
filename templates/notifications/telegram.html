@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Уведомления в Telegram · ОТ Донер{% endblock %}
+{% block content %}
+<a class="back" href="{% url 'home' %}">← Назад</a>
+<h1>Уведомления в Telegram</h1>
+
+{% if problem %}
+  <div class="alert alert-error">
+    <div class="alert-title">Бот недоступен</div>
+    {{ problem }}
+  </div>
+  <p class="hint">
+    Токен бота задаётся на сервере. На Render: сервис → Environment → переменная TELEGRAM_BOT_TOKEN.
+    После сохранения подождите, пока сайт перезапустится, и обновите эту страницу.
+  </p>
+{% else %}
+
+  <div class="card">
+    <div class="card-label">Сейчас</div>
+    {% if user.telegram_chat_id %}
+      <div class="card-title text-ok">Подключено</div>
+      <p class="hint">Опоздания, неполадки в зале и срочные проблемы приходят вам в чат с ботом.</p>
+      <form method="post" action="{% url 'telegram_test' %}">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-primary">Отправить проверочное сообщение</button>
+      </form>
+    {% else %}
+      <div class="card-title text-late">Не подключено</div>
+      <p class="hint">Два шага — и сообщения начнут приходить в Telegram.</p>
+    {% endif %}
+  </div>
+
+  <h2 class="section-title">{% if user.telegram_chat_id %}Подключить другой Telegram{% else %}Как подключить{% endif %}</h2>
+  <div class="card">
+    <p><b>1.</b> Нажмите кнопку — откроется бот. В Telegram нажмите <b>«Старт»</b> (или «Перезапустить»).</p>
+    <a class="btn btn-primary" href="{{ link }}" target="_blank" rel="noopener">Открыть бота в Telegram</a>
+    <p style="margin-top:18px"><b>2.</b> Вернитесь сюда и нажмите:</p>
+    <form method="post" action="{% url 'telegram_check' %}">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-ghost">Я нажал «Старт» — проверить</button>
+    </form>
+    <p class="hint">Если всё в порядке, в Telegram сразу придёт сообщение «Проверка связи».</p>
+  </div>
+{% endif %}
+
+{% if recent %}
+  <h2 class="section-title">Последние сообщения вам в Telegram</h2>
+  <div class="card">
+    {% for n in recent %}
+      <div class="row">
+        <span>{{ n.created_at|date:"d.m H:i" }} · {{ n.title }}</span>
+        {% if n.state == "sent" %}<b class="text-ok">{{ n.get_state_display }}</b>{% else %}<b class="text-late">{{ n.get_state_display }}</b>{% endif %}
+      </div>
+      {% if n.error %}<p class="hint">{{ n.error }}</p>{% endif %}
+    {% endfor %}
+  </div>
+{% endif %}
+{% endblock %}

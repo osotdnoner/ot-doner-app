@@ -130,6 +130,7 @@ h1 { font-size: 26px; margin: 4px 0 12px; }
   padding: 14px 0; border-bottom: 1px solid var(--line); color: var(--ink); text-decoration: none; font-weight: 600;
 }
 .tabs .hint { margin: 12px 0; }
+.tab-row:last-child { border-bottom: 0; }
 
 .pill {
   display: inline-block; white-space: nowrap; border-radius: 999px; padding: 4px 10px; font-size: 13px; font-weight: 600;

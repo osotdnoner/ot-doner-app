@@ -1,6 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <p class="muted hello">Здравствуйте, {{ user.first_name|default:user.username }}</p>
+
+<div class="card tabs">
+  <a class="tab-row" href="{% url 'telegram' %}">
+    <span class="tab-name">Уведомления в Telegram</span>
+    {% if user.telegram_chat_id %}<span class="pill pill-ok">Подключено</span>{% else %}<span class="pill pill-todo">Подключить</span>{% endif %}
+  </a>
+</div>
 <h1>Смены за сутки</h1>
 
 <div class="card">
