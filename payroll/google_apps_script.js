@@ -1,3 +1,4 @@
+/** @OnlyCurrentDoc */
 /**
  * ОТ Донер — зарплатная таблица.
  *
@@ -138,9 +139,51 @@ function addMissingRates(book, rows) {
     existing.push(key);
     const r = sheet.getLastRow() + 1;
     sheet.getRange(r, 2, 1, 2).setValues([[row[2], row[5]]]);
-    sheet.getRange(r, 6).setFormula("=D" + r + "+E" + r);
+    sheet.getRange(r, 6).setFormula(F("=D" + r + "+E" + r));
     sheet.getRange(r, 4, 1, 3).setBackground(INPUT_BG).setNumberFormat(MONEY);
   });
+}
+
+// ---------------------------------------------------------------- формулы под язык таблицы
+
+// В русской таблице аргументы формул разделяются «;», в английской — «,». Скрипт пишет формулы
+// с запятыми и сам переводит их под язык таблицы (запятые внутри кавычек не трогает).
+let SEPARATOR = null;
+
+function separator() {
+  if (SEPARATOR) return SEPARATOR;
+  const book = SpreadsheetApp.getActiveSpreadsheet();
+  const probe = book.insertSheet("проверка_" + Date.now());
+  probe.getRange("A1").setFormula("=SUM(1,2)");
+  SpreadsheetApp.flush();
+  SEPARATOR = probe.getRange("A1").getDisplayValue() === "3" ? "," : ";";
+  book.deleteSheet(probe);
+  return SEPARATOR;
+}
+
+function F(formula) {
+  if (separator() === ",") return formula;
+  let out = "";
+  let inString = false;
+  for (const ch of formula) {
+    if (ch === '"') inString = !inString;
+    out += !inString && ch === "," ? ";" : ch;
+  }
+  return out;
+}
+
+/** Перестроить листы заново (только пока на листе «Смены» нет данных). */
+function rebuild() {
+  const book = SpreadsheetApp.getActiveSpreadsheet();
+  const data = book.getSheetByName(DATA);
+  if (data && data.getLastRow() > 1) throw new Error("На листе «Смены» уже есть данные — перестраивать нельзя.");
+  const keep = book.insertSheet("временный");
+  [TOTALS, DATA, RATES, HELP].forEach((name) => {
+    const s = book.getSheetByName(name);
+    if (s) book.deleteSheet(s);
+  });
+  setup();
+  book.deleteSheet(keep);
 }
 
 // ---------------------------------------------------------------- построение таблицы
@@ -152,7 +195,7 @@ function setup() {
   buildData(book);
   buildTotals(book);
   buildHelp(book);
-  ["Лист1", "Sheet1", "Лист 1"].forEach((name) => {
+  ["Лист1", "Sheet1", "Лист 1", "временный"].forEach((name) => {
     const s = book.getSheetByName(name);
     if (s && s.getLastRow() === 0 && book.getSheets().length > 1) book.deleteSheet(s);
   });
@@ -173,15 +216,15 @@ function buildData(book) {
   if (sheet.getLastRow() > 0) return; // уже построен — данные не трогаем
   sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
   const key = "C2:C&\"|\"&F2:F";
-  const look = (col) => "VLOOKUP(" + key + ",'" + RATES + "'!A:F," + col + ",FALSE)";
-  sheet.getRange("Q1").setFormula(
+  const look = (col) => "VLOOKUP(" + key + ",'" + RATES + "'!A:F," + col + ",0)";
+  sheet.getRange("Q1").setFormula(F(
     '={"Ставка, ₸";ARRAYFORMULA(IF(A2:A="",,IF(G2:G="Не вышел",0,IFERROR(' +
     'IF(D2:D="День",' + look(4) + ',IF(D2:D="Ночь",' + look(5) + ',' + look(6) + '))*1,0))))}'
-  );
-  sheet.getRange("R1").setFormula('={"К выплате, ₸";ARRAYFORMULA(IF(A2:A="",,Q2:Q-K2:K+L2:L))}');
-  sheet.getRange("S1").setFormula('={"Отработано смен";ARRAYFORMULA(IF(A2:A="",,IF(G2:G="Не вышел",0,1)))}');
-  sheet.getRange("T1").setFormula('={"Опозданий";ARRAYFORMULA(IF(A2:A="",,IF(G2:G="Опоздал",1,0)))}');
-  sheet.getRange("U1").setFormula('={"Невыходов";ARRAYFORMULA(IF(A2:A="",,IF(G2:G="Не вышел",1,0)))}');
+  ));
+  sheet.getRange("R1").setFormula(F('={"К выплате, ₸";ARRAYFORMULA(IF(A2:A="",,Q2:Q-K2:K+L2:L))}'));
+  sheet.getRange("S1").setFormula(F('={"Отработано смен";ARRAYFORMULA(IF(A2:A="",,IF(G2:G="Не вышел",0,1)))}'));
+  sheet.getRange("T1").setFormula(F('={"Опозданий";ARRAYFORMULA(IF(A2:A="",,IF(G2:G="Опоздал",1,0)))}'));
+  sheet.getRange("U1").setFormula(F('={"Невыходов";ARRAYFORMULA(IF(A2:A="",,IF(G2:G="Не вышел",1,0)))}'));
 
   styleHeader(sheet.getRange("A1:U1"));
   sheet.getRange("Q1:U1").setBackground("#7c2d12");
@@ -210,7 +253,7 @@ function buildData(book) {
 function buildRates(book) {
   const sheet = sheetNamed(book, RATES);
   if (sheet.getLastRow() > 0) return;
-  sheet.getRange("A1").setFormula('={"Ключ";ARRAYFORMULA(IF(B2:B="",,B2:B&"|"&C2:C))}');
+  sheet.getRange("A1").setFormula(F('={"Ключ";ARRAYFORMULA(IF(B2:B="",,B2:B&"|"&C2:C))}'));
   sheet.getRange("B1:F1").setValues([["Филиал", "Должность", "День, ₸", "Ночь, ₸", "Полная смена, ₸"]]);
   const rows = [];
   BRANCHES.forEach((b) => {
@@ -220,7 +263,7 @@ function buildRates(book) {
   rows.forEach((row, i) => {
     const r = i + 2;
     sheet.getRange(r, 2, 1, 2).setValues([[row[0], row[1]]]);
-    sheet.getRange(r, 6).setFormula(row[2] ? "=D" + r + "+E" + r : "=D" + r);
+    sheet.getRange(r, 6).setFormula(F(row[2] ? "=D" + r + "+E" + r : "=D" + r));
     sheet.getRange(r, 4, 1, 3).setNumberFormat(MONEY);
     sheet.getRange(r, 4).setBackground(INPUT_BG);
     if (row[2]) {
@@ -246,13 +289,13 @@ function buildTotals(book) {
   const sheet = sheetNamed(book, TOTALS);
   if (sheet.getLastRow() > 0) return;
   sheet.getRange("A1:A4").setValues([["Месяц"], ["Период"], ["С"], ["По"]]).setFontWeight("bold");
-  sheet.getRange("B1").setFormula("=EOMONTH(TODAY(),-1)+1").setNumberFormat("mmmm yyyy").setBackground(INPUT_BG)
+  sheet.getRange("B1").setFormula(F("=EOMONTH(TODAY(),-1)+1")).setNumberFormat("mmmm yyyy").setBackground(INPUT_BG)
     .setNote("Любая дата нужного месяца. Сейчас стоит текущий месяц — впишите, например, 01.09.2026, чтобы посмотреть сентябрь.");
   sheet.getRange("B2").setValue("1–15").setBackground(INPUT_BG).setDataValidation(
     SpreadsheetApp.newDataValidation().requireValueInList(["1–15", "16–конец месяца", "Весь месяц"], true).build()
   );
-  sheet.getRange("B3").setFormula('=IF(B2="16–конец месяца",DATE(YEAR(B1),MONTH(B1),16),DATE(YEAR(B1),MONTH(B1),1))');
-  sheet.getRange("B4").setFormula('=IF(B2="1–15",DATE(YEAR(B1),MONTH(B1),15),EOMONTH(B1,0))');
+  sheet.getRange("B3").setFormula(F('=IF(B2="16–конец месяца",DATE(YEAR(B1),MONTH(B1),16),DATE(YEAR(B1),MONTH(B1),1))'));
+  sheet.getRange("B4").setFormula(F('=IF(B2="1–15",DATE(YEAR(B1),MONTH(B1),15),EOMONTH(B1,0))'));
   sheet.getRange("B3:B4").setNumberFormat("dd.mm.yyyy");
 
   // К выплате по филиалам
@@ -261,15 +304,15 @@ function buildTotals(book) {
   BRANCHES.forEach((b, i) => {
     const r = i + 2;
     sheet.getRange(r, 4).setValue(b.name);
-    sheet.getRange(r, 5).setFormula(
+    sheet.getRange(r, 5).setFormula(F(
       "=SUMIFS('" + DATA + "'!R:R,'" + DATA + "'!C:C,D" + r + ",'" + DATA + "'!B:B,\">=\"&$B$3,'" + DATA + "'!B:B,\"<=\"&$B$4)"
-    );
+    ));
   });
   const totalRow = BRANCHES.length + 2;
   sheet.getRange(totalRow, 4).setValue("Всего").setFontWeight("bold");
-  sheet.getRange(totalRow, 5).setFormula(
+  sheet.getRange(totalRow, 5).setFormula(F(
     "=SUMIFS('" + DATA + "'!R:R,'" + DATA + "'!B:B,\">=\"&$B$3,'" + DATA + "'!B:B,\"<=\"&$B$4)"
-  ).setFontWeight("bold");
+  )).setFontWeight("bold");
   sheet.getRange(2, 5, BRANCHES.length + 1, 1).setNumberFormat(MONEY);
 
   // По каждому сотруднику за период
@@ -280,9 +323,9 @@ function buildTotals(book) {
     "group by C, E, F order by C, E " +
     "label C 'Филиал', E 'Сотрудник', F 'Должность', sum(S) 'Смен', sum(T) 'Опозданий', sum(U) 'Невыходов', " +
     "sum(Q) 'По ставкам, ₸', sum(K) 'Штрафы, ₸', sum(L) 'Бонусы, ₸', sum(R) 'К выплате, ₸'";
-  sheet.getRange(start + 1, 1).setFormula(
+  sheet.getRange(start + 1, 1).setFormula(F(
     "=IFERROR(QUERY('" + DATA + "'!A:U,\"" + q + "\",1),\"За этот период отметок пока нет\")"
-  );
+  ));
   styleHeader(sheet.getRange(start + 1, 1, 1, 10));
   sheet.getRange(start + 2, 7, 500, 4).setNumberFormat(MONEY);
   sheet.setFrozenRows(0);
