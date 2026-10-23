@@ -1,10 +1,16 @@
+from django.conf import settings
 from django.db import models
 
 
 class Employee(models.Model):
-    """Сотрудник точки. Аккаунта в приложении у него нет — администратор выбирает его из списка."""
+    """
+    Сотрудник точки. Аккаунта в приложении у него нет — администратор отмечает его из списка.
+    Администраторы смены тоже есть в этом списке (должность «Администратор», связь с их аккаунтом),
+    чтобы их опоздания и штрафы попадали в зарплату вместе со всеми.
+    """
 
     class Position(models.TextChoices):
+        ADMIN = "admin", "Администратор"
         CASHIER = "cashier", "Кассир"
         RUNNER = "runner", "Раннер"
         DONER = "doner", "Донерщик"
@@ -19,6 +25,11 @@ class Employee(models.Model):
     position = models.CharField("Должность", max_length=20, choices=Position.choices)
     phone = models.CharField("Телефон", max_length=20, blank=True)
     is_active = models.BooleanField("Работает", default=True)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, verbose_name="Аккаунт в приложении", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="employee",
+        help_text="Только для администраторов смены: связывает отметку «Я пришёл» с зарплатой",
+    )
 
     class Meta:
         verbose_name = "Сотрудник"

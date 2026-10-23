@@ -71,9 +71,19 @@
 
   <h2 class="section-title">Приём смены</h2>
   <div class="card tabs">
+    <a class="tab-row" href="{% url 'attendance' shift.id %}">
+      <span class="tab-name">1. Сотрудники на смене</span>
+      {% if staff_marked.1 and staff_marked.0 == staff_marked.1 %}
+        <span class="pill pill-ok">Готово</span>
+      {% elif staff_marked.0 %}
+        <span class="pill">{{ staff_marked.0 }} из {{ staff_marked.1 }}</span>
+      {% else %}
+        <span class="pill pill-todo">Отметить</span>
+      {% endif %}
+    </a>
     {% for tab in tabs %}
       <a class="tab-row" href="{% url 'checklist' shift.id tab.template.code %}">
-        <span class="tab-name">{{ forloop.counter }}. {{ tab.template.title }}</span>
+        <span class="tab-name">{{ forloop.counter|add:1 }}. {{ tab.template.title }}</span>
         {% if tab.run.finished_at %}
           <span class="pill pill-ok">Готово</span>
         {% elif tab.run %}

@@ -113,7 +113,7 @@ def _deliver_in_background(ids: list[int]):
 
 
 def _start_delivery(ids: list[int]):
-    if not settings.NOTIFICATIONS_ASYNC:
+    if not settings.BACKGROUND_ASYNC:
         _deliver(ids)
         return
     # Отправляем после сохранения в базу, иначе фоновый поток может не увидеть записи

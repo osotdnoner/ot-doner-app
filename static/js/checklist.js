@@ -88,16 +88,13 @@
     saveBtn.addEventListener("click", () => submit(form.dataset.status, form.dataset.photoProblem === "1"));
   });
 
-  // ---- Сотрудники: приход и униформа ----
+  // ---- Сотрудники: униформа и допуск (приход отмечается на экране «Сотрудники на смене») ----
   document.querySelectorAll(".staff-form").forEach((form) => {
     const errorBox = form.querySelector(".item-error");
-    const uniformPart = form.querySelector(".uniform-part");
     const missingPart = form.querySelector(".missing-part");
 
     function update() {
-      const attendance = (form.querySelector("[name=attendance]:checked") || {}).value;
       const uniform = (form.querySelector("[name=uniform]:checked") || {}).value;
-      uniformPart.hidden = !attendance || attendance === "absent";
       missingPart.hidden = uniform !== "violation";
     }
     form.addEventListener("change", update);
@@ -106,8 +103,7 @@
     form.querySelector(".save-staff").addEventListener("click", async () => {
       errorBox.hidden = true;
       const body = new FormData(form);
-      const needPhoto = body.get("attendance") !== "absent"
-        && (body.get("uniform") === "violation" || body.get("not_admitted") === "1");
+      const needPhoto = body.get("uniform") === "violation" || body.get("not_admitted") === "1";
       if (!(await attachPhoto(body, needPhoto, form.dataset.label, errorBox))) return;
       setBusy(form, true);
       const result = await post(form.dataset.url, body);

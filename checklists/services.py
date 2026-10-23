@@ -14,6 +14,8 @@ from django.utils import timezone
 
 from notifications.models import Notification
 from notifications.service import notify
+from payroll.models import Attendance
+from payroll.services import marked_count
 from staff.models import Employee
 
 from .models import ChecklistTemplate, Item, ItemResult, Run, Section, StaffCheck, Status, Task
@@ -44,6 +46,7 @@ class SectionView:
     section: Section
     entries: list[Entry] = field(default_factory=list)
     staff: list[tuple[Employee, StaffCheck | None]] = field(default_factory=list)
+    unmarked: int = 0  # сколько сотрудников ещё не отмечено на экране «Сотрудники на смене»
 
 
 def make_label(item: Item, toilet_no: int, toilets_count: int) -> str:
@@ -78,7 +81,15 @@ def get_or_start_run(shift, template: ChecklistTemplate) -> Run:
 
 
 def staff_on_point(point):
-    return Employee.objects.filter(point=point, is_active=True)
+    return Employee.objects.filter(point=point, is_active=True).exclude(position=Employee.Position.ADMIN)
+
+
+def staff_for_run(run: Run):
+    """Кого проверять на форму: сотрудники, которые по отметке администратора вышли на смену."""
+    came = Attendance.objects.filter(
+        shift=run.shift, status__in=[Attendance.Status.ON_TIME, Attendance.Status.LATE],
+    ).values("employee_id")
+    return staff_on_point(run.shift.point).filter(id__in=came)
 
 
 def build_view(run: Run) -> list[SectionView]:
@@ -93,7 +104,9 @@ def build_view(run: Run) -> list[SectionView]:
     for section in run.template.sections.all():
         view = views.setdefault(section.id, SectionView(section))
         if section.includes_staff:
-            view.staff = [(e, checks.get(e.id)) for e in staff_on_point(point)]
+            view.staff = [(e, checks.get(e.id)) for e in staff_for_run(run)]
+            done, total = marked_count(run.shift)
+            view.unmarked = total - done
     return [views[s.id] for s in run.template.sections.all() if s.id in views]
 
 
@@ -108,8 +121,9 @@ def photo_required(run: Run, item: Item, toilet_no: int, status: str) -> bool:
 def progress(run: Run) -> tuple[int, int]:
     total_entries = len(all_entries(run.template, run.shift.point.toilets_count))
     has_staff = run.template.sections.filter(includes_staff=True).exists()
-    total_staff = staff_on_point(run.shift.point).count() if has_staff else 0
-    done = run.results.count() + run.staff_checks.count()
+    staff = staff_for_run(run)
+    total_staff = staff.count() if has_staff else 0
+    done = run.results.count() + (run.staff_checks.filter(employee__in=staff).count() if has_staff else 0)
     return done, total_entries + total_staff
 
 
@@ -186,34 +200,34 @@ def answer_item(run: Run, item: Item, toilet_no: int, *, status: str, user, prob
     return result
 
 
-def answer_staff(run: Run, employee: Employee, *, attendance: str, user, uniform_ok: bool | None = None,
+def answer_staff(run: Run, employee: Employee, *, user, uniform_ok: bool | None = None,
                  missing: list[str] | None = None, not_admitted: bool = False, comment: str = "",
                  photo=None) -> StaffCheck:
+    """Форма и допуск сотрудника. Пришёл ли он и вовремя ли — из экрана «Сотрудники на смене»."""
     _ensure_open(run)
     point = run.shift.point
     if employee.point_id != point.id:
         raise ChecklistError("Этот сотрудник работает на другой точке.")
-    if attendance not in StaffCheck.Attendance.values:
-        raise ChecklistError("Отметьте, пришёл ли сотрудник.")
+    attendance = Attendance.objects.filter(shift=run.shift, employee=employee).first()
+    if attendance is None or attendance.status == Attendance.Status.ABSENT:
+        raise ChecklistError("Сначала отметьте, что сотрудник вышел на смену: «Сотрудники на смене».")
 
     missing = [m for m in (missing or []) if m in StaffCheck.UNIFORM_ITEMS]
     comment = comment.strip()
-    if attendance == StaffCheck.Attendance.ABSENT:
-        uniform_ok, missing, not_admitted = None, [], False
-    else:
-        if uniform_ok is None:
-            raise ChecklistError("Отметьте, в порядке ли форма.")
-        if uniform_ok is False and not (missing or comment):
-            raise ChecklistError("Отметьте, чего не хватает в форме, или напишите комментарий.")
-        if (uniform_ok is False or not_admitted) and not photo:
-            raise ChecklistError("Сфотографируйте сотрудника.")
-        if not_admitted and not comment:
-            raise ChecklistError("Напишите, почему сотрудник не допущен к работе.")
+    if uniform_ok is None:
+        raise ChecklistError("Отметьте, в порядке ли форма.")
+    if uniform_ok is False and not (missing or comment):
+        raise ChecklistError("Отметьте, чего не хватает в форме, или напишите комментарий.")
+    if (uniform_ok is False or not_admitted) and not photo:
+        raise ChecklistError("Сфотографируйте сотрудника.")
+    if not_admitted and not comment:
+        raise ChecklistError("Напишите, почему сотрудник не допущен к работе.")
 
+    came = StaffCheck.Attendance.LATE if attendance.status == Attendance.Status.LATE else StaffCheck.Attendance.PRESENT
     check, _ = StaffCheck.objects.update_or_create(
         run=run, employee=employee,
         defaults={
-            "attendance": attendance, "uniform_ok": uniform_ok, "uniform_missing": ", ".join(missing),
+            "attendance": came, "uniform_ok": uniform_ok, "uniform_missing": ", ".join(missing),
             "not_admitted": not_admitted, "comment": comment,
         },
     )
@@ -221,16 +235,11 @@ def answer_staff(run: Run, employee: Employee, *, attendance: str, user, uniform
         check.photo = photo
         check.save(update_fields=["photo"])
 
-    position = employee.get_position_display().lower()
     if not_admitted:
         notify(
             point, Notification.Event.URGENT, "КРИТИЧНО: сотрудник не допущен к работе",
-            f"Точка «{point}»: {employee} ({position}).\nПричина: {comment}\nАдминистратор: {user}.",
-        )
-    elif attendance == StaffCheck.Attendance.ABSENT:
-        notify(
-            point, Notification.Event.URGENT, "Сотрудник не вышел на смену",
-            f"Точка «{point}»: {employee} ({position}).\nАдминистратор: {user}.",
+            f"Точка «{point}»: {employee} ({employee.get_position_display().lower()}).\n"
+            f"Причина: {comment}\nАдминистратор: {user}.",
         )
     return check
 
@@ -238,6 +247,10 @@ def answer_staff(run: Run, employee: Employee, *, attendance: str, user, uniform
 def finish_run(run: Run, now: datetime | None = None) -> Run:
     now = now or timezone.now()
     _ensure_open(run)
+    if run.template.sections.filter(includes_staff=True).exists():
+        marked, employees = marked_count(run.shift)
+        if marked < employees:
+            raise ChecklistError(f"Сначала отметьте сотрудников на смене: осталось {employees - marked}.")
     done, total = progress(run)
     if done < total:
         raise ChecklistError(f"Отмечено {done} из {total}. Пройдите все пункты.")
@@ -265,13 +278,21 @@ def problem_lines(run: Run) -> list[str]:
             line += " (ответственный не назначен)"
         lines.append(line)
 
+    attendance = (
+        Attendance.objects.filter(shift=run.shift)
+        .exclude(status=Attendance.Status.ON_TIME)
+        .exclude(employee__position=Employee.Position.ADMIN)
+        .select_related("employee").order_by("employee__full_name")
+    )
+    for a in attendance:
+        name = f"{a.employee} ({a.employee.get_position_display().lower()})"
+        if a.status == Attendance.Status.ABSENT:
+            lines.append(f"• {name} не вышел на смену: {a.reason}")
+        else:
+            lines.append(f"• {name} опоздал на {a.late_human}: {a.reason}")
+
     for check in run.staff_checks.select_related("employee").order_by("id"):
         name = f"{check.employee} ({check.employee.get_position_display().lower()})"
-        if check.attendance == StaffCheck.Attendance.ABSENT:
-            lines.append(f"• {name} не вышел на смену")
-            continue
-        if check.attendance == StaffCheck.Attendance.LATE:
-            lines.append(f"• {name} опоздал")
         if check.not_admitted:
             lines.append(f"• {name} не допущен к работе: {check.comment} [КРИТИЧНО]")
         elif check.uniform_ok is False:

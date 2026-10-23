@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     "staff",     # сотрудники точек
     "checklists",  # чек-листы приёма смены, ответы, задачи
     "notifications",  # сообщения в Telegram и WhatsApp
+    "payroll",   # зарплата: выход на смену, штрафы, бонусы, выгрузка в Google Таблицу
 ]
 
 MIDDLEWARE = [
@@ -173,8 +174,15 @@ WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_TEMPLATE = os.getenv("WHATSAPP_TEMPLATE", "otdoner_alert")
 WHATSAPP_TEMPLATE_LANG = os.getenv("WHATSAPP_TEMPLATE_LANG", "ru")
 WHATSAPP_API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v23.0")
-# Отправлять в фоне, чтобы администратор не ждал мессенджеры. В автотестах — сразу.
-NOTIFICATIONS_ASYNC = env_bool("NOTIFICATIONS_ASYNC", "test" not in sys.argv)
+
+# --- Зарплата: выгрузка в Google Таблицу -----------------------------------
+# Адрес веб-приложения Google Apps Script внутри зарплатной таблицы (заканчивается на /exec)
+# и секретное слово, которое знает только скрипт. Как получить — README, раздел «Зарплата».
+GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL", "")
+GOOGLE_SHEET_SECRET = os.getenv("GOOGLE_SHEET_SECRET", "")
+
+# Сообщения и выгрузку в таблицу отправлять в фоне, чтобы администратор не ждал. В автотестах — сразу.
+BACKGROUND_ASYNC = env_bool("BACKGROUND_ASYNC", "test" not in sys.argv)
 
 
 LOGGING = {

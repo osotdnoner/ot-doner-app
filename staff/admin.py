@@ -8,3 +8,4 @@ class EmployeeAdmin(admin.ModelAdmin):
     list_display = ("full_name", "position", "point", "phone", "is_active")
     list_filter = ("point", "position", "is_active")
     search_fields = ("full_name", "phone")
+    autocomplete_fields = ("user",)

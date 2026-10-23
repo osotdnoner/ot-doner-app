@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% load static money %}
+{% block title %}Сотрудники на смене · ОТ Донер{% endblock %}
+{% block content %}
+<a class="back" href="{% url 'home' %}">← На главную</a>
+<h1>Сотрудники на смене</h1>
+<p class="muted">Точка «{{ shift.point.name }}» · {{ shift.get_kind_display|lower }} смена с {{ start|time:"H:i" }} · отмечено {{ done }} из {{ total }}</p>
+<div class="progress"><div class="progress-bar" style="width: {% if total %}{% widthratio done total 100 %}{% else %}100{% endif %}%"></div></div>
+
+<details class="rules">
+  <summary>Штрафы и бонусы: как считается</summary>
+  <ul>
+    {% for t in tiers %}<li>Опоздание от {{ t.minutes_from }} мин — {{ t.amount|money }}</li>{% empty %}<li>Штрафы за опоздание не заданы</li>{% endfor %}
+    <li>Не вышел — {% if absence_fine %}{{ absence_fine|money }}{% else %}без автоматического штрафа, решает шеф{% endif %}</li>
+    <li>Бонус ставите вы: сумма и за что.{% if sheet_on %} Всё сразу уходит в зарплатную таблицу.{% endif %}</li>
+  </ul>
+</details>
+
+{% for employee, a in rows %}
+  <article class="item {% if a.status == 'on_time' %}item-ok{% elif a.status == 'late' %}item-deviation{% elif a.status == 'absent' %}item-critical{% endif %}" id="emp-{{ employee.id }}">
+    <div class="item-head">
+      <div>
+        <div class="item-title">{{ employee.full_name }}</div>
+        <div class="item-hint">{{ employee.get_position_display }}</div>
+      </div>
+      {% if not a %}<span class="pill pill-todo">Отметить</span>
+      {% elif a.status == "on_time" %}<span class="pill pill-ok">Вовремя</span>
+      {% elif a.status == "late" %}<span class="pill pill-deviation">Опоздал на {{ a.late_human }}</span>
+      {% else %}<span class="pill pill-critical">Не вышел</span>{% endif %}
+    </div>
+
+    {% if a %}
+      {% if a.status == "late" %}<div class="item-summary">Пришёл в {{ a.arrived_at|time:"H:i" }} · {{ a.reason }}</div>{% endif %}
+      {% if a.status == "absent" %}<div class="item-summary">Причина: {{ a.reason }}</div>{% endif %}
+      {% if a.fine %}<div class="money money-fine">Штраф {{ a.fine|money }}</div>{% endif %}
+      {% for b in a.bonuses.all %}
+        <form method="post" action="{% url 'bonus_delete' shift.id b.id %}" class="money money-bonus">
+          {% csrf_token %}
+          <span>Бонус {{ b.amount|money }} — {{ b.reason }}</span>
+          <button type="submit" class="link" onclick="return confirm('Удалить бонус?')">удалить</button>
+        </form>
+      {% endfor %}
+      <button type="button" class="link edit" data-edit="mark-{{ employee.id }}">Изменить</button>
+    {% endif %}
+
+    <form method="post" action="{% url 'attendance_mark' shift.id employee.id %}" class="mark-form" id="mark-{{ employee.id }}" {% if a %}hidden{% endif %}>
+      {% csrf_token %}
+      <div class="segmented">
+        <label><input type="radio" name="status" value="on_time" {% if a.status == "on_time" %}checked{% endif %}><span>Вовремя</span></label>
+        <label><input type="radio" name="status" value="late" {% if a.status == "late" %}checked{% endif %}><span>Опоздал</span></label>
+        <label><input type="radio" name="status" value="absent" {% if a.status == "absent" %}checked{% endif %}><span>Не вышел</span></label>
+      </div>
+      <div class="late-part" hidden>
+        <label class="field-label" for="arrived-{{ employee.id }}">Во сколько пришёл</label>
+        <input type="time" id="arrived-{{ employee.id }}" name="arrived" value="{% if a.arrived_at %}{{ a.arrived_at|time:'H:i' }}{% else %}{{ now_hm }}{% endif %}">
+      </div>
+      <div class="reason-part" hidden>
+        <label class="field-label" for="reason-{{ employee.id }}">Причина</label>
+        <textarea id="reason-{{ employee.id }}" name="reason" rows="2" placeholder="Например: проспал, пробка, заболел">{{ a.reason }}</textarea>
+      </div>
+      <button type="submit" class="btn btn-primary save-mark" hidden>Сохранить</button>
+    </form>
+
+    {% if a and a.status != "absent" %}
+      <details class="bonus">
+        <summary>+ Бонус</summary>
+        <form method="post" action="{% url 'attendance_bonus' shift.id employee.id %}">
+          {% csrf_token %}
+          <label class="field-label" for="amount-{{ employee.id }}">Сумма, ₸</label>
+          <input type="number" id="amount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="2000" required>
+          <label class="field-label" for="breason-{{ employee.id }}">За что</label>
+          <input type="text" id="breason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: вышел на замену, отличная работа в пик" required>
+          <button type="submit" class="btn btn-primary">Добавить бонус</button>
+        </form>
+      </details>
+    {% endif %}
+  </article>
+{% empty %}
+  <p class="hint">У точки нет сотрудников в списке. Управляющий добавляет их в панели: «Сотрудники» → «Добавить».</p>
+{% endfor %}
+
+{% if total and done == total %}
+  <div class="alert alert-ok">Все сотрудники отмечены.{% if sheet_on %} Данные ушли в зарплатную таблицу.{% endif %}</div>
+  <a class="btn btn-ghost" href="{% url 'home' %}">Дальше: приём смены</a>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.querySelectorAll(".mark-form").forEach((form) => {
+    const late = form.querySelector(".late-part");
+    const reason = form.querySelector(".reason-part");
+    const save = form.querySelector(".save-mark");
+    function update(event) {
+      const status = (form.querySelector("[name=status]:checked") || {}).value;
+      // «Вовремя» — одним нажатием, без кнопки «Сохранить»
+      if (status === "on_time" && event) { form.submit(); return; }
+      late.hidden = status !== "late";
+      reason.hidden = !status || status === "on_time";
+      save.hidden = !status || status === "on_time";
+      reason.querySelector("textarea").required = !reason.hidden;
+      reason.querySelector("textarea").placeholder = status === "absent"
+        ? "Например: заболел, не отвечает на звонки" : "Например: проспал, пробка";
+    }
+    form.addEventListener("change", update);
+    update();
+  });
+  document.querySelectorAll("[data-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.getElementById(button.dataset.edit).hidden = false;
+      button.hidden = true;
+    });
+  });
+</script>
+{% endblock %}

@@ -8,6 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from accounts.models import User
+from payroll.services import mark
 from points.models import Point
 from shifts.models import Shift
 from shifts.tests import fake_selfie
@@ -42,12 +43,31 @@ class ChecklistServiceTests(TestCase):
         self.template = ChecklistTemplate.objects.get(code="hall")
         self.run = get_or_start_run(self.shift, self.template)
 
+    def came(self, *employees):
+        for employee in employees:
+            mark(self.shift, employee, "on_time", user=self.admin)
+
     def item(self, title, section="Зал"):
         return Item.objects.get(section__template=self.template, section__title=section, title=title)
 
     def test_seeded_checklist_counts(self):
-        # 14 пунктов зала + 3 пункта × 2 санузла + 1 общее фото + 2 сотрудника
+        # 14 пунктов зала + 3 пункта × 2 санузла + 1 общее фото; форму проверяем только у вышедших
+        self.assertEqual(progress(self.run), (0, 14 + 6 + 1))
+        self.came(self.cashier, self.cleaner)
         self.assertEqual(progress(self.run), (0, 14 + 6 + 1 + 2))
+
+    def test_uniform_is_checked_only_for_those_who_came(self):
+        self.came(self.cashier)
+        mark(self.shift, self.cleaner, "absent", reason="Заболела", user=self.admin)
+        staff = [e for v in build_view(self.run) for e, _ in v.staff]
+        self.assertEqual(staff, [self.cashier])
+        with self.assertRaisesMessage(ChecklistError, "Сначала отметьте"):
+            answer_staff(self.run, self.cleaner, uniform_ok=True, user=self.admin)
+
+    def test_finish_needs_everyone_marked(self):
+        self.came(self.cashier)
+        with self.assertRaisesMessage(ChecklistError, "Сначала отметьте сотрудников на смене: осталось 1"):
+            finish_run(self.run)
 
     def test_toilets_are_numbered_when_there_are_several(self):
         labels = [e.label for v in build_view(self.run) for e in v.entries]
@@ -108,38 +128,36 @@ class ChecklistServiceTests(TestCase):
             answer_item(self.run, item, 0, status=Status.OK, user=self.admin)
 
     def test_staff_uniform_violation_needs_photo_and_details(self):
+        self.came(self.cashier)
         with self.assertRaisesMessage(ChecklistError, "чего не хватает"):
-            answer_staff(self.run, self.cashier, attendance="present", uniform_ok=False, user=self.admin)
+            answer_staff(self.run, self.cashier, uniform_ok=False, user=self.admin)
         with self.assertRaisesMessage(ChecklistError, "Сфотографируйте"):
-            answer_staff(self.run, self.cashier, attendance="present", uniform_ok=False, missing=["Фартук"], user=self.admin)
+            answer_staff(self.run, self.cashier, uniform_ok=False, missing=["Фартук"], user=self.admin)
         check = answer_staff(
-            self.run, self.cashier, attendance="present", uniform_ok=False, missing=["Фартук", "Бейдж"],
+            self.run, self.cashier, uniform_ok=False, missing=["Фартук", "Бейдж"],
             comment="Выдан запасной фартук", photo=fake_selfie(), user=self.admin,
         )
         self.assertEqual(check.uniform_missing, "Фартук, Бейдж")
 
-    def test_absent_employee_notifies_manager(self):
-        with mock.patch("checklists.services.notify") as notify:
-            check = answer_staff(self.run, self.cleaner, attendance="absent", user=self.admin)
-        self.assertIsNone(check.uniform_ok)
-        self.assertIn("не вышел", notify.call_args.args[2])
-
     def test_not_admitted_is_critical(self):
+        self.came(self.cashier)
         with mock.patch("checklists.services.notify") as notify:
             answer_staff(
-                self.run, self.cashier, attendance="present", uniform_ok=True, not_admitted=True,
+                self.run, self.cashier, uniform_ok=True, not_admitted=True,
                 comment="Температура, кашель", photo=fake_selfie(), user=self.admin,
             )
         self.assertIn("КРИТИЧНО", notify.call_args.args[2])
 
     def complete_everything(self):
+        self.came(self.cashier, self.cleaner)
         for view in build_view(self.run):
             for entry in view.entries:
                 answer_item(self.run, entry.item, entry.toilet_no, status=Status.OK, photo=fake_selfie(), user=self.admin)
             for employee, _ in view.staff:
-                answer_staff(self.run, employee, attendance="present", uniform_ok=True, user=self.admin)
+                answer_staff(self.run, employee, uniform_ok=True, user=self.admin)
 
     def test_finish_requires_all_answers(self):
+        self.came(self.cashier, self.cleaner)
         with self.assertRaisesMessage(ChecklistError, "Пройдите все пункты"):
             finish_run(self.run)
         self.complete_everything()
@@ -159,16 +177,17 @@ class ChecklistServiceTests(TestCase):
                     answer_item(self.run, entry.item, entry.toilet_no, status=Status.OK, photo=fake_selfie(), user=self.admin)
             for employee, check in view.staff:
                 if not check:
-                    answer_staff(self.run, employee, attendance="present", uniform_ok=True, user=self.admin)
+                    answer_staff(self.run, employee, uniform_ok=True, user=self.admin)
 
     def test_finish_sends_one_summary_with_all_problems(self):
         from notifications.models import Notification
         boss = User.objects.create_user("87010000005", role=User.Role.OWNER, telegram_chat_id="555")
         answer_item(self.run, self.item("Освещение"), 0, status=Status.DEVIATION, problem="Не горит лампа",
                     photo=fake_selfie(), responsible=self.cleaner, deadline_minutes=30, user=self.admin)
-        answer_staff(self.run, self.cleaner, attendance="absent", user=self.admin)
-        answer_staff(self.run, self.cashier, attendance="late", uniform_ok=False, missing=["Фартук"],
-                     photo=fake_selfie(), user=self.admin)
+        mark(self.shift, self.cleaner, "absent", reason="Заболела", user=self.admin)
+        mark(self.shift, self.cashier, "late", arrived=f"{timezone.localtime(self.shift.planned_start) + timedelta(minutes=20):%H:%M}",
+             reason="Пробка", user=self.admin)
+        answer_staff(self.run, self.cashier, uniform_ok=False, missing=["Фартук"], photo=fake_selfie(), user=self.admin)
         self.complete_the_rest()
         finish_run(self.run, now=self.run.started_at + timedelta(minutes=12))
 
@@ -177,8 +196,8 @@ class ChecklistServiceTests(TestCase):
         self.assertIn("Неполадок: 4.", summary.text)
         self.assertIn("• Освещение — Не горит лампа (устраняет Гульнар, до ", summary.text)
         self.assertIn("• Гульнар (", summary.text)
-        self.assertIn(") не вышел на смену", summary.text)
-        self.assertIn(") опоздал", summary.text)
+        self.assertIn(") не вышел на смену: Заболела", summary.text)
+        self.assertRegex(summary.text, r"\) опоздал на (19|20) мин: Пробка")  # смена в тесте начинается не ровно в минуту
         self.assertIn(": нарушение формы — Фартук", summary.text)
         self.assertNotIn("быстро", summary.text)
 
@@ -223,8 +242,9 @@ class ChecklistViewTests(TestCase):
         self.admin.points.add(self.point)
         self.other = User.objects.create_user("87010000009", password="test12345")
         self.other.points.add(self.point)
-        Employee.objects.create(point=self.point, full_name="Айдос", position="cashier")
+        employee = Employee.objects.create(point=self.point, full_name="Айдос", position="cashier")
         self.shift = make_shift(self.point, self.admin)
+        mark(self.shift, employee, "on_time", user=self.admin)
         self.client.login(username="87010000001", password="test12345")
         self.url = reverse("checklist", args=[self.shift.id, "hall"])
 
@@ -270,6 +290,6 @@ class ChecklistViewTests(TestCase):
         run = Run.objects.get()
         employee = Employee.objects.get()
         response = self.client.post(reverse("answer_staff", args=[run.id, employee.id]),
-                                    {"attendance": "present", "uniform": "ok"})
+                                    {"uniform": "ok"})
         self.assertTrue(response.json()["ok"])
         self.assertTrue(StaffCheck.objects.get().uniform_ok)

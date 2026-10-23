@@ -40,12 +40,7 @@
       {% if not run.finished_at %}
       <form class="staff-form" id="staff-form-{{ employee.id }}" {% if check %}hidden{% endif %}
             data-url="{% url 'answer_staff' run.id employee.id %}" data-label="{{ employee.full_name }}">
-        <div class="segmented">
-          <label><input type="radio" name="attendance" value="present" {% if check.attendance == "present" %}checked{% endif %}><span>Пришёл</span></label>
-          <label><input type="radio" name="attendance" value="late" {% if check.attendance == "late" %}checked{% endif %}><span>Опоздал</span></label>
-          <label><input type="radio" name="attendance" value="absent" {% if check.attendance == "absent" %}checked{% endif %}><span>Не вышел</span></label>
-        </div>
-        <div class="uniform-part" hidden>
+        <div class="uniform-part">
           <div class="segmented">
             <label><input type="radio" name="uniform" value="ok" {% if check.uniform_ok %}checked{% endif %}><span>Форма в порядке</span></label>
             <label><input type="radio" name="uniform" value="violation" {% if check.uniform_ok is False %}checked{% endif %}><span>Нарушение</span></label>
@@ -67,10 +62,17 @@
       {% endif %}
     </article>
   {% empty %}
-    {% if view.section.includes_staff %}
-      <p class="hint">У точки нет сотрудников в списке. Управляющий добавляет их в панели управления.</p>
+    {% if view.section.includes_staff and not view.unmarked %}
+      <p class="hint">На смене нет сотрудников, которых нужно проверить.</p>
     {% endif %}
   {% endfor %}
+  {% if view.unmarked %}
+    <div class="alert alert-warn">
+      Ещё не отмечено, кто вышел на смену: {{ view.unmarked }}.
+      Форму проверяем только у тех, кто пришёл.
+      <a href="{% url 'attendance' shift.id %}">Отметить сотрудников →</a>
+    </div>
+  {% endif %}
 
   {# ----- Пункты ----- #}
   {% for entry in view.entries %}

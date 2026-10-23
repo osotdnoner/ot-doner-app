@@ -182,6 +182,8 @@ def perform_checkin(user, lat: float | None, lon: float | None, accuracy: float 
         return CheckinResult("already", "Вы уже отметились на эту смену.", shift=existing, point=point, distance_m=dist)
 
     log(CheckinAttempt.Result.OK, point, dist)
+    from payroll.services import record_admin  # приход администратора — сразу в зарплатный учёт
+    record_admin(shift)
     if late:
         return CheckinResult("late", f"Вы опоздали на {shift.late_human}.", shift=shift, point=point, distance_m=dist)
     return CheckinResult("ok", "Вы на смене. Отметка принята вовремя.", shift=shift, point=point, distance_m=dist)

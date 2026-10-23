@@ -7,7 +7,8 @@
 - просроченные задачи;
 - смены, на которые никто не отметился;
 - опоздания, о которых ещё не сообщили (администратор не указал причину за 10 минут);
-- повторяет сообщения, которые не ушли из-за сбоя связи.
+- повторяет сообщения, которые не ушли из-за сбоя связи;
+- досылает в Google Таблицу зарплатные строки, которые не дошли.
 
 На сервере это делает cron (позже — Celery). Команду можно запускать сколько угодно
 раз: каждое сообщение уходит только один раз.
@@ -24,6 +25,7 @@ from django.utils import timezone
 from checklists.models import Task
 from notifications.models import Notification
 from notifications.service import notify, retry_unsent
+from payroll.sheets import push_pending
 from points.models import Point
 from shifts.models import MissedCheckinAlert, Shift
 from shifts.services import report_late, shift_slots_around
@@ -93,7 +95,9 @@ class Command(BaseCommand):
         missed = notify_missed_checkins(now)
         late = notify_late_without_reason(now)
         retried = retry_unsent(now)
+        synced, sync_error = push_pending() if settings.GOOGLE_SHEET_URL else (0, "")
         self.stdout.write(
             f"Просроченных задач: {tasks}. Смен без отметки: {missed}. "
-            f"Опозданий без причины: {late}. Повторно отправлено: {retried}."
+            f"Опозданий без причины: {late}. Повторно отправлено: {retried}. "
+            f"В таблицу: {synced}{' (ошибка: ' + sync_error + ')' if sync_error else ''}."
         )

@@ -102,7 +102,6 @@ def answer_staff_view(request, run_id: int, employee_id: int):
     try:
         answer_staff(
             run, employee,
-            attendance=request.POST.get("attendance", ""),
             uniform_ok={"ok": True, "violation": False}.get(uniform),
             missing=request.POST.getlist("missing"),
             not_admitted=request.POST.get("not_admitted") == "1",

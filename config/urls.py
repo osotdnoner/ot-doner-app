@@ -7,6 +7,7 @@ from django.views.static import serve as serve_file
 
 from checklists import views as checklist_views
 from notifications import views as notification_views
+from payroll import views as payroll_views
 from shifts import views as shift_views
 
 admin.site.site_header = "ОТ Донер — управление"
@@ -17,6 +18,10 @@ urlpatterns = [
     path("", shift_views.home, name="home"),
     path("checkin/", shift_views.checkin, name="checkin"),
     path("shift/<int:shift_id>/late-reason/", shift_views.late_reason, name="late_reason"),
+    path("shift/<int:shift_id>/staff/", payroll_views.attendance_page, name="attendance"),
+    path("shift/<int:shift_id>/staff/<int:employee_id>/mark/", payroll_views.mark_view, name="attendance_mark"),
+    path("shift/<int:shift_id>/staff/<int:employee_id>/bonus/", payroll_views.bonus_view, name="attendance_bonus"),
+    path("shift/<int:shift_id>/bonus/<int:bonus_id>/delete/", payroll_views.bonus_delete_view, name="bonus_delete"),
     path("shift/<int:shift_id>/check/<slug:code>/", checklist_views.run_page, name="checklist"),
     path("run/<int:run_id>/item/<int:item_id>/<int:toilet_no>/", checklist_views.answer_item_view, name="answer_item"),
     path("run/<int:run_id>/staff/<int:employee_id>/", checklist_views.answer_staff_view, name="answer_staff"),
