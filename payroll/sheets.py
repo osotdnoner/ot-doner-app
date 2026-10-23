@@ -137,3 +137,21 @@ def push_pending(limit: int = 1000) -> tuple[int, str]:
         if error:
             break
     return sent, error
+
+
+def check_connection() -> tuple[bool, str]:
+    """Проверка связи с таблицей: пустой запрос с секретным словом. Таблица его принимает и ничего не меняет."""
+    url = settings.GOOGLE_SHEET_URL
+    if not url:
+        return False, "Не задан GOOGLE_SHEET_URL."
+    payload = {"secret": settings.GOOGLE_SHEET_SECRET, "headers": HEADERS, "rows": [], "delete": []}
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        data = response.json()
+    except requests.RequestException as exc:
+        return False, f"Нет связи с Google: {exc.__class__.__name__}."
+    except ValueError:
+        return False, "Таблица ответила не тем: проверьте, что адрес GOOGLE_SHEET_URL заканчивается на /exec."
+    if not data.get("ok"):
+        return False, data.get("error") or f"Таблица ответила кодом {response.status_code}."
+    return True, ""

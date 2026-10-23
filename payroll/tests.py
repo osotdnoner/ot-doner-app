@@ -386,3 +386,23 @@ class BranchesTests(TestCase):
         p16 = Point.objects.create(name="16 мкрн", day_shift_end=time(23), has_night_shift=False)
         self.assertEqual(current_slot(p16, at(22, 30), early_minutes=60).end, at(23))
         self.assertIsNone(current_slot(p16, at(23, 30), early_minutes=60))
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", GOOGLE_SHEET_URL="https://script.google.com/macros/s/x/exec",
+                   GOOGLE_SHEET_SECRET="tajna")
+class SheetCheckTests(TestCase):
+    def setUp(self):
+        User.objects.create_superuser("87000000000", password="test12345", role=User.Role.OWNER)
+        self.client.login(username="87000000000", password="test12345")
+
+    def test_check_button(self):
+        page = self.client.get(reverse("admin:payroll_attendance_changelist"))
+        self.assertContains(page, "Проверить связь с Google Таблицей")
+        with mock.patch("payroll.sheets.requests.post", return_value=sheet_response()) as post:
+            response = self.client.get(reverse("admin:payroll_check_sheet"), follow=True)
+        self.assertContains(response, "Связь с Google Таблицей есть")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual((post.call_args.kwargs["json"]["rows"], post.call_args.kwargs["json"]["secret"]), ([], "tajna"))
+        with mock.patch("payroll.sheets.requests.post", return_value=sheet_response(False, "Секретное слово не совпадает")):
+            response = self.client.get(reverse("admin:payroll_check_sheet"), follow=True)
+        self.assertContains(response, "Секретное слово не совпадает")

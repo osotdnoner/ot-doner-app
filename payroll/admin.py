@@ -1,4 +1,6 @@
 from django.contrib import admin, messages
+from django.shortcuts import redirect
+from django.urls import path
 from django.utils import timezone
 
 from . import sheets
@@ -52,8 +54,22 @@ class AttendanceAdmin(admin.ModelAdmin):
         "synced_at", "sync_error",
     )
 
+    change_list_template = "admin/payroll/attendance/change_list.html"
+
     def has_add_permission(self, request):
         return False  # выходы отмечает администратор в приложении
+
+    def get_urls(self):
+        extra = [path("check-sheet/", self.admin_site.admin_view(self.check_sheet), name="payroll_check_sheet")]
+        return extra + super().get_urls()
+
+    def check_sheet(self, request):
+        ok, error = sheets.check_connection()
+        if ok:
+            self.message_user(request, "Связь с Google Таблицей есть, секретное слово совпадает.", messages.SUCCESS)
+        else:
+            self.message_user(request, f"Нет связи с Google Таблицей. {error}", messages.ERROR)
+        return redirect("admin:payroll_attendance_changelist")
 
     def get_queryset(self, request):
         return super().get_queryset(request).prefetch_related("bonuses")
