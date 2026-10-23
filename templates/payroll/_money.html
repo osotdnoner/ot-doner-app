@@ -1,0 +1,62 @@
+{% load money %}
+{# Деньги по человеку за смену: штрафы, бонусы, авансы и кнопки «+». Нужны: shift, employee, a (может быть пустым). #}
+{% if a.fine %}<div class="money money-fine">Штраф {{ a.fine|money }}{% if a.status == "late" %} за опоздание{% elif a.status == "absent" %} за невыход{% endif %}</div>{% endif %}
+{% for p in a.penalties.all %}
+  <form method="post" action="{% url 'penalty_delete' shift.id p.id %}" class="money money-fine money-line">
+    {% csrf_token %}
+    <span>Штраф {{ p.amount|money }} — {{ p.reason }}</span>
+    <button type="submit" class="link" onclick="return confirm('Удалить штраф?')">удалить</button>
+  </form>
+{% endfor %}
+{% for b in a.bonuses.all %}
+  <form method="post" action="{% url 'bonus_delete' shift.id b.id %}" class="money money-bonus money-line">
+    {% csrf_token %}
+    <span>Бонус {{ b.amount|money }} — {{ b.reason }}</span>
+    <button type="submit" class="link" onclick="return confirm('Удалить бонус?')">удалить</button>
+  </form>
+{% endfor %}
+{% for adv in employee.shift_advances %}
+  <form method="post" action="{% url 'advance_delete' shift.id adv.id %}" class="money money-advance money-line">
+    {% csrf_token %}
+    <span>Аванс {{ adv.amount|money }}{% if adv.comment %} — {{ adv.comment }}{% endif %}</span>
+    <button type="submit" class="link" onclick="return confirm('Удалить аванс?')">удалить</button>
+  </form>
+{% endfor %}
+
+<div class="money-actions">
+  {% if a.status == "on_time" or a.status == "late" %}
+  <details class="bonus">
+    <summary>+ Штраф</summary>
+    <form method="post" action="{% url 'attendance_penalty' shift.id employee.id %}">
+      {% csrf_token %}
+      <label class="field-label" for="pamount-{{ employee.id }}">Сумма, ₸</label>
+      <input type="number" id="pamount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="2000" required>
+      <label class="field-label" for="preason-{{ employee.id }}">За что</label>
+      <input type="text" id="preason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: телефон на кассе, грубость гостю" required>
+      <button type="submit" class="btn btn-primary">Поставить штраф</button>
+    </form>
+  </details>
+  <details class="bonus">
+    <summary>+ Бонус</summary>
+    <form method="post" action="{% url 'attendance_bonus' shift.id employee.id %}">
+      {% csrf_token %}
+      <label class="field-label" for="amount-{{ employee.id }}">Сумма, ₸</label>
+      <input type="number" id="amount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="2000" required>
+      <label class="field-label" for="breason-{{ employee.id }}">За что</label>
+      <input type="text" id="breason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: вышел на замену, отличная работа в пик" required>
+      <button type="submit" class="btn btn-primary">Добавить бонус</button>
+    </form>
+  </details>
+  {% endif %}
+  <details class="bonus">
+    <summary>+ Аванс</summary>
+    <form method="post" action="{% url 'attendance_advance' shift.id employee.id %}">
+      {% csrf_token %}
+      <label class="field-label" for="aamount-{{ employee.id }}">Сумма, ₸</label>
+      <input type="number" id="aamount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="10000" required>
+      <label class="field-label" for="acomment-{{ employee.id }}">Комментарий</label>
+      <input type="text" id="acomment-{{ employee.id }}" name="comment" maxlength="200" placeholder="Например: из кассы, наличными">
+      <button type="submit" class="btn btn-primary">Записать аванс</button>
+    </form>
+  </details>
+</div>

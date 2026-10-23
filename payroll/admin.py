@@ -4,7 +4,7 @@ from django.urls import path
 from django.utils import timezone
 
 from . import sheets
-from .models import Attendance, Bonus, FineRules, LateFineTier
+from .models import Advance, Attendance, Bonus, FineRules, LateFineTier, Penalty
 
 
 class LateFineTierInline(admin.TabularInline):
@@ -25,7 +25,6 @@ class FineRulesAdmin(admin.ModelAdmin):
 
     def changelist_view(self, request, extra_context=None):
         # Запись одна — сразу открываем её
-        from django.shortcuts import redirect
         return redirect("admin:payroll_finerules_change", FineRules.current().pk)
 
 
@@ -36,22 +35,26 @@ class BonusInline(admin.TabularInline):
     readonly_fields = ("created_by", "created_at")
 
 
+class PenaltyInline(BonusInline):
+    model = Penalty
+
+
 @admin.register(Attendance)
 class AttendanceAdmin(admin.ModelAdmin):
-    list_display = ("shift_date", "point", "employee", "status", "late_minutes", "fine", "bonus", "short_reason", "in_sheet")
+    list_display = ("shift_date", "point", "employee", "status", "late_minutes", "fines", "bonus", "substitute", "in_sheet")
     list_filter = ("status", "shift__point", "employee__position", "needs_sync")
     search_fields = ("employee__full_name", "reason")
     date_hierarchy = "shift__planned_start"
     list_select_related = ("shift__point", "employee")
-    inlines = [BonusInline]
+    inlines = [PenaltyInline, BonusInline]
     actions = ["send_to_sheet"]
     fields = (
-        "shift", "employee", "status", "arrived_at", "late_minutes", "reason",
+        "shift", "employee", "status", "kind", "position", "substitute_for", "arrived_at", "late_minutes", "reason",
         "fine", "fine_note", "fine_manual", "marked_by", "marked_at", "synced_at", "sync_error",
     )
     readonly_fields = (
-        "shift", "employee", "status", "arrived_at", "late_minutes", "fine_manual", "marked_by", "marked_at",
-        "synced_at", "sync_error",
+        "shift", "employee", "status", "kind", "substitute_for", "arrived_at", "late_minutes", "fine_manual",
+        "marked_by", "marked_at", "synced_at", "sync_error",
     )
 
     change_list_template = "admin/payroll/attendance/change_list.html"
@@ -72,7 +75,7 @@ class AttendanceAdmin(admin.ModelAdmin):
         return redirect("admin:payroll_attendance_changelist")
 
     def get_queryset(self, request):
-        return super().get_queryset(request).prefetch_related("bonuses")
+        return super().get_queryset(request).prefetch_related("bonuses", "penalties")
 
     @admin.display(description="Дата", ordering="shift__planned_start")
     def shift_date(self, obj):
@@ -86,9 +89,13 @@ class AttendanceAdmin(admin.ModelAdmin):
     def bonus(self, obj):
         return obj.bonus_total or "—"
 
-    @admin.display(description="Причина")
-    def short_reason(self, obj):
-        return (obj.reason[:50] + "…") if len(obj.reason) > 50 else (obj.reason or "—")
+    @admin.display(description="Штраф, ₸")
+    def fines(self, obj):
+        return obj.fine_total or "—"
+
+    @admin.display(description="Замена")
+    def substitute(self, obj):
+        return obj.substitute_text.replace("Замена: ", "") or "—"
 
     @admin.display(description="В таблице", boolean=True)
     def in_sheet(self, obj):
@@ -101,16 +108,26 @@ class AttendanceAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
 
     def save_related(self, request, form, formsets, change):
-        for formset in formsets:
-            for bonus in formset.save(commit=False):
-                if not bonus.created_by_id:
-                    bonus.created_by = request.user
-                bonus.save()
-            for bonus in formset.deleted_objects:
-                bonus.delete()
+        for formset in formsets:  # бонусы и штрафы
+            for item in formset.save(commit=False):
+                if not item.created_by_id:
+                    item.created_by = request.user
+                item.save()
+            for item in formset.deleted_objects:
+                item.delete()
         form.instance.needs_sync = True
         Attendance.objects.filter(pk=form.instance.pk).update(needs_sync=True, marked_at=timezone.now())
         sheets.queue([form.instance.pk])
+
+    def delete_model(self, request, obj):
+        key = sheets.shift_key(obj)
+        super().delete_model(request, obj)
+        sheets.queue(deletes=[key])
+
+    def delete_queryset(self, request, queryset):
+        keys = [sheets.shift_key(a) for a in queryset]
+        super().delete_queryset(request, queryset)
+        sheets.queue(deletes=keys)
 
     @admin.action(description="Отправить в Google Таблицу ещё раз")
     def send_to_sheet(self, request, queryset):
@@ -121,3 +138,39 @@ class AttendanceAdmin(admin.ModelAdmin):
             self.message_user(request, f"Не ушло: {error}", messages.ERROR)
         else:
             self.message_user(request, f"Отправлено строк: {sent}.", messages.SUCCESS)
+
+
+@admin.register(Advance)
+class AdvanceAdmin(admin.ModelAdmin):
+    """Авансы. Админ записывает их на смене, шеф — здесь. В таблице аванс вычитается из суммы к выплате."""
+
+    list_display = ("given_on", "employee", "amount", "point", "comment", "given_by", "in_sheet")
+    list_filter = ("point", "needs_sync")
+    search_fields = ("employee__full_name", "comment")
+    date_hierarchy = "given_on"
+    autocomplete_fields = ("employee",)
+    fields = ("employee", "amount", "given_on", "point", "comment", "given_by", "shift", "synced_at", "sync_error")
+    readonly_fields = ("given_by", "shift", "synced_at", "sync_error")
+
+    @admin.display(description="В таблице", boolean=True)
+    def in_sheet(self, obj):
+        return not obj.needs_sync
+
+    def save_model(self, request, obj, form, change):
+        if not obj.given_by_id:
+            obj.given_by = request.user
+        if not obj.point_id:
+            obj.point = obj.employee.point
+        obj.needs_sync = True
+        super().save_model(request, obj, form, change)
+        sheets.queue(advances=[obj.id])
+
+    def delete_model(self, request, obj):
+        key = sheets.advance_key(obj)
+        super().delete_model(request, obj)
+        sheets.queue(deletes=[key])
+
+    def delete_queryset(self, request, queryset):
+        keys = [sheets.advance_key(a) for a in queryset]
+        super().delete_queryset(request, queryset)
+        sheets.queue(deletes=keys)

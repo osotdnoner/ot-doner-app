@@ -85,11 +85,15 @@ def staff_on_point(point):
 
 
 def staff_for_run(run: Run):
-    """Кого проверять на форму: сотрудники, которые по отметке администратора вышли на смену."""
+    """Кого проверять на форму: кто по отметке администратора вышел на смену, включая замены с других филиалов."""
     came = Attendance.objects.filter(
         shift=run.shift, status__in=[Attendance.Status.ON_TIME, Attendance.Status.LATE],
     ).values("employee_id")
-    return staff_on_point(run.shift.point).filter(id__in=came)
+    return (
+        Employee.objects.filter(id__in=came, is_active=True)
+        .exclude(position=Employee.Position.ADMIN)
+        .order_by("position", "full_name")
+    )
 
 
 def build_view(run: Run) -> list[SectionView]:
@@ -206,8 +210,6 @@ def answer_staff(run: Run, employee: Employee, *, user, uniform_ok: bool | None 
     """Форма и допуск сотрудника. Пришёл ли он и вовремя ли — из экрана «Сотрудники на смене»."""
     _ensure_open(run)
     point = run.shift.point
-    if employee.point_id != point.id:
-        raise ChecklistError("Этот сотрудник работает на другой точке.")
     attendance = Attendance.objects.filter(shift=run.shift, employee=employee).first()
     if attendance is None or attendance.status == Attendance.Status.ABSENT:
         raise ChecklistError("Сначала отметьте, что сотрудник вышел на смену: «Сотрудники на смене».")

@@ -5,7 +5,8 @@
 (во сколько пришёл и почему), не вышел (почему) или выходной (не его смена).
 Дневной администратор может отметить полную смену — до конца ночной; ночной администратор
 видит таких сотрудников уже отмеченными. Штраф считается сам по ступеням из панели.
-Бонус администратор ставит сам: сумма и за что.
+Бонус, штраф во время смены и аванс администратор ставит сам: сумма и за что.
+Если кто-то не вышел, админ вызывает замену: человека с другого филиала или из резерва (выручалку).
 Каждое изменение сразу уходит в Google Таблицу (см. sheets.py).
 """
 
@@ -20,9 +21,9 @@ from notifications.service import notify
 from staff.models import Employee
 
 from . import sheets
-from .models import Attendance, Bonus, FineRules
+from .models import Advance, Attendance, Bonus, FineRules, Penalty
 
-MAX_BONUS = 1_000_000
+MAX_AMOUNT = 1_000_000
 
 
 class PayrollError(Exception):
@@ -102,11 +103,11 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
         shift=shift, employee=employee,
     )
     was_absent = attendance.pk and attendance.status == Attendance.Status.ABSENT
-    has_bonus = attendance.pk and attendance.bonuses.exists()
+    has_bonus = attendance.pk and (attendance.bonuses.exists() or attendance.penalties.exists())
 
     if status == Attendance.Status.OFF:
         if has_bonus:
-            raise PayrollError("У сотрудника есть бонус за эту смену. Сначала удалите бонус.")
+            raise PayrollError("У сотрудника есть бонус или штраф за эту смену. Сначала удалите их.")
         arrived_at, minutes, reason, fine = None, 0, "", 0
     elif status == Attendance.Status.ON_TIME:
         arrived_at, minutes, reason, fine = None, 0, "", 0
@@ -123,7 +124,7 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
         if not reason:
             raise PayrollError("Напишите, почему сотрудник не вышел.")
         if has_bonus:
-            raise PayrollError("У сотрудника есть бонус за эту смену. Сначала удалите бонус.")
+            raise PayrollError("У сотрудника есть бонус или штраф за эту смену. Сначала удалите их.")
         arrived_at, minutes, fine = None, 0, rules.absence_fine
 
     attendance.status = status
@@ -147,18 +148,27 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
     return attendance
 
 
-def add_bonus(attendance: Attendance, *, amount: str | int, reason: str, user) -> Bonus:
+def parse_amount(value, what: str) -> int:
     try:
-        amount = int(str(amount).replace(" ", "").replace(" ", ""))
+        amount = int(str(value).replace(" ", "").replace("\u00a0", ""))
     except ValueError:
-        raise PayrollError("Сумма бонуса — целое число в тенге, например 2000.")
-    if not 0 < amount <= MAX_BONUS:
-        raise PayrollError("Сумма бонуса должна быть больше нуля.")
+        raise PayrollError(f"Сумма {what} — целое число в тенге, например 2000.")
+    if not 0 < amount <= MAX_AMOUNT:
+        raise PayrollError(f"Сумма {what} должна быть больше нуля.")
+    return amount
+
+
+def _require_worked(attendance: Attendance, what: str):
+    if attendance.status not in Attendance.WORKED:
+        raise PayrollError(f"Сотрудник не работает в эту смену — {what} поставить нельзя.")
+
+
+def add_bonus(attendance: Attendance, *, amount: str | int, reason: str, user) -> Bonus:
+    amount = parse_amount(amount, "бонуса")
     reason = reason.strip()
     if not reason:
         raise PayrollError("Напишите, за что бонус.")
-    if attendance.status not in Attendance.WORKED:
-        raise PayrollError("Сотрудник не работает в эту смену — бонус поставить нельзя.")
+    _require_worked(attendance, "бонус")
     bonus = Bonus.objects.create(attendance=attendance, amount=amount, reason=reason[:200], created_by=user)
     resync(attendance)
     return bonus
@@ -168,6 +178,99 @@ def remove_bonus(bonus: Bonus):
     attendance = bonus.attendance
     bonus.delete()
     resync(attendance)
+
+
+def add_penalty(attendance: Attendance, *, amount: str | int, reason: str, user) -> Penalty:
+    """Штраф во время смены: сотрудник что-то нарушил."""
+    amount = parse_amount(amount, "штрафа")
+    reason = reason.strip()
+    if not reason:
+        raise PayrollError("Напишите, за что штраф.")
+    _require_worked(attendance, "штраф")
+    penalty = Penalty.objects.create(attendance=attendance, amount=amount, reason=reason[:200], created_by=user)
+    resync(attendance)
+    return penalty
+
+
+def remove_penalty(penalty: Penalty):
+    attendance = penalty.attendance
+    penalty.delete()
+    resync(attendance)
+
+
+def add_advance(employee: Employee, *, amount: str | int, comment: str = "", user, shift=None,
+                point=None) -> Advance:
+    """Аванс: деньги заранее. Вычитается из суммы к выплате в таблице."""
+    amount = parse_amount(amount, "аванса")
+    where = shift.point if shift is not None else (point or employee.point)
+    advance = Advance.objects.create(
+        employee=employee, amount=amount, comment=comment.strip()[:200], given_by=user, shift=shift, point=where,
+        given_on=local(timezone.now(), where).date() if where else timezone.localdate(),
+    )
+    sheets.queue(advances=[advance.id])
+    return advance
+
+
+def remove_advance(advance: Advance):
+    key = sheets.advance_key(advance)
+    advance.delete()
+    sheets.queue(deletes=[key])
+
+
+def substitute_candidates(shift):
+    """Кого можно вызвать на замену: резерв и сотрудники других филиалов, кто ещё не на этой смене."""
+    already = Attendance.objects.filter(shift=shift).values("employee_id")
+    return (
+        Employee.objects.filter(is_active=True)
+        .exclude(point=shift.point)
+        .exclude(position=Employee.Position.ADMIN)
+        .exclude(id__in=already)
+        .select_related("point")
+        .order_by("point__name", "full_name")
+    )
+
+
+def substitutes_on(shift):
+    return (
+        Attendance.objects.filter(shift=shift).exclude(employee__point=shift.point)
+        .exclude(employee__position=Employee.Position.ADMIN)
+        .select_related("employee__point", "substitute_for").prefetch_related("bonuses", "penalties")
+    )
+
+
+@transaction.atomic
+def add_substitute(shift, employee: Employee, *, user, instead_of: Employee | None = None, position: str = "",
+                   full: bool = False, now: datetime | None = None) -> Attendance:
+    """Вызвали на замену человека с другого филиала или из резерва."""
+    now = now or timezone.now()
+    if employee.point_id == shift.point_id:
+        raise PayrollError("Это сотрудник вашего филиала — отметьте его в общем списке.")
+    if employee.position == Employee.Position.ADMIN or not employee.is_active:
+        raise PayrollError("Этого человека нельзя вызвать на замену.")
+    if Attendance.objects.filter(shift=shift, employee=employee).exists():
+        raise PayrollError("Этот человек уже на смене.")
+    if instead_of is not None and instead_of.point_id != shift.point_id:
+        raise PayrollError("Заменять можно только сотрудника своего филиала.")
+    if position and position not in Employee.Position.values:
+        raise PayrollError("Выберите должность из списка.")
+    position = position or (instead_of.position if instead_of else "")
+    attendance = Attendance.objects.create(
+        shift=shift, employee=employee, status=Attendance.Status.ON_TIME,
+        kind=Attendance.Kind.FULL if (full and can_be_full(shift)) else shift.kind,
+        arrived_at=now, position=position if position != employee.position else "",
+        substitute_for=instead_of, marked_by=user,
+    )
+    sheets.queue([attendance.id])
+    return attendance
+
+
+def remove_substitute(attendance: Attendance):
+    """Замену добавили по ошибке — убираем и из приложения, и из таблицы."""
+    if not attendance.is_substitute:
+        raise PayrollError("Это сотрудник вашего филиала: поставьте ему «Выходной».")
+    key = sheets.shift_key(attendance)
+    attendance.delete()
+    sheets.queue(deletes=[key])
 
 
 def resync(attendance: Attendance):

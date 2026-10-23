@@ -23,7 +23,11 @@ class Employee(models.Model):
         OPERATOR = "operator", "Оператор"
         OTHER = "other", "Другое"
 
-    point = models.ForeignKey("points.Point", verbose_name="Точка", on_delete=models.PROTECT, related_name="employees")
+    point = models.ForeignKey(
+        "points.Point", verbose_name="Филиал", on_delete=models.PROTECT, related_name="employees",
+        null=True, blank=True,
+        help_text="Пусто — человек в резерве (выручалка): его можно вызвать на замену на любой филиал",
+    )
     full_name = models.CharField("Имя и фамилия", max_length=120)
     position = models.CharField("Должность", max_length=20, choices=Position.choices)
     phone = models.CharField("Телефон", max_length=20, blank=True)
@@ -41,3 +45,8 @@ class Employee(models.Model):
 
     def __str__(self) -> str:
         return self.full_name
+
+    @property
+    def home(self) -> str:
+        """Родной филиал или «Резерв»."""
+        return self.point.name if self.point_id else "Резерв"

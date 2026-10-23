@@ -44,17 +44,10 @@
       {% else %}<span class="pill pill-critical">Не вышел</span>{% endif %}
     </div>
 
+    {% if employee.replaced_by_sub %}<div class="item-summary muted">Заменяет: {{ employee.replaced_by_sub }}</div>{% endif %}
     {% if a %}
       {% if a.status == "late" %}<div class="item-summary">Пришёл в {{ a.arrived_at|time:"H:i" }} · {{ a.reason }}</div>{% endif %}
       {% if a.status == "absent" %}<div class="item-summary">Причина: {{ a.reason }}</div>{% endif %}
-      {% if a.fine %}<div class="money money-fine">Штраф {{ a.fine|money }}</div>{% endif %}
-      {% for b in a.bonuses.all %}
-        <form method="post" action="{% url 'bonus_delete' shift.id b.id %}" class="money money-bonus">
-          {% csrf_token %}
-          <span>Бонус {{ b.amount|money }} — {{ b.reason }}</span>
-          <button type="submit" class="link" onclick="return confirm('Удалить бонус?')">удалить</button>
-        </form>
-      {% endfor %}
       <button type="button" class="link edit" data-edit="mark-{{ employee.id }}">Изменить</button>
     {% endif %}
 
@@ -83,24 +76,67 @@
       <button type="submit" class="btn btn-primary save-mark" hidden>Сохранить</button>
     </form>
 
-    {% if a.status == "on_time" or a.status == "late" %}
-      <details class="bonus">
-        <summary>+ Бонус</summary>
-        <form method="post" action="{% url 'attendance_bonus' shift.id employee.id %}">
-          {% csrf_token %}
-          <label class="field-label" for="amount-{{ employee.id }}">Сумма, ₸</label>
-          <input type="number" id="amount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="2000" required>
-          <label class="field-label" for="breason-{{ employee.id }}">За что</label>
-          <input type="text" id="breason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: вышел на замену, отличная работа в пик" required>
-          <button type="submit" class="btn btn-primary">Добавить бонус</button>
-        </form>
-      </details>
-    {% endif %}
+    {% include "payroll/_money.html" %}
   </article>
   {% endif %}
 {% empty %}
   <p class="hint">У точки нет сотрудников в списке. Управляющий добавляет их в панели: «Сотрудники» → «Добавить».</p>
 {% endfor %}
+
+<h2 class="section-title">Замены и выручалки</h2>
+{% for a in subs %}
+  <article class="item item-ok" id="emp-{{ a.employee.id }}">
+    <div class="item-head">
+      <div>
+        <div class="item-title">{{ a.employee.full_name }}</div>
+        <div class="item-hint">{{ a.position_display }} · {% if a.employee.point %}с филиала {{ a.employee.point }}{% else %}резерв{% endif %}</div>
+      </div>
+      <span class="pill pill-ok">Замена{% if a.kind == "full" %} · полная{% endif %}</span>
+    </div>
+    <div class="item-summary">Вышел в {{ a.arrived_at|time:"H:i" }}{% if a.substitute_for %} · вместо {{ a.substitute_for }}{% endif %}</div>
+    {% with employee=a.employee %}{% include "payroll/_money.html" %}{% endwith %}
+    <form method="post" action="{% url 'substitute_remove' shift.id a.id %}">
+      {% csrf_token %}
+      <button type="submit" class="link" onclick="return confirm('Убрать замену? Строка удалится и из таблицы.')">Убрать (добавили по ошибке)</button>
+    </form>
+  </article>
+{% endfor %}
+
+<details class="card substitute">
+  <summary>+ Вызвать замену</summary>
+  {% if candidates %}
+  <form method="post" action="{% url 'substitute_add' shift.id %}">
+    {% csrf_token %}
+    <label class="field-label" for="sub-employee">Кто вышел</label>
+    <select id="sub-employee" name="employee" class="select-big" required>
+      <option value="">— выберите —</option>
+      {% regroup candidates by home as groups %}
+      {% for g in groups %}
+        <optgroup label="{% if g.grouper == 'Резерв' %}Резерв (выручалки){% else %}{{ g.grouper }}{% endif %}">
+          {% for e in g.list %}<option value="{{ e.id }}">{{ e.full_name }} · {{ e.get_position_display|lower }}</option>{% endfor %}
+        </optgroup>
+      {% endfor %}
+    </select>
+    <label class="field-label" for="sub-instead">Вместо кого</label>
+    <select id="sub-instead" name="instead_of" class="select-big">
+      <option value="">— никого, просто не хватает людей —</option>
+      {% for employee, a, from_day in rows %}<option value="{{ employee.id }}">{{ employee.full_name }} · {{ employee.get_position_display|lower }}{% if a.status == "absent" %} (не вышел){% endif %}</option>{% endfor %}
+    </select>
+    <label class="field-label" for="sub-position">Кем работает на смене</label>
+    <select id="sub-position" name="position" class="select-big">
+      <option value="">— как у заменяемого (или его обычная) —</option>
+      {% for value, label in positions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+    </select>
+    {% if can_be_full %}
+      <label class="check-line"><input type="checkbox" name="full" value="1"> Полная смена — до {{ full_end|time:"H:i" }}</label>
+    {% endif %}
+    <button type="submit" class="btn btn-primary">Добавить замену</button>
+    <p class="hint">Ставка — по этому филиалу и должности на смене. В таблице будет видно, кого заменял и откуда пришёл.</p>
+  </form>
+  {% else %}
+    <p class="hint">Нет людей для замены. Управляющий добавляет их в панели: «Сотрудники» → «Добавить»; для резерва поле «Филиал» оставьте пустым.</p>
+  {% endif %}
+</details>
 
 {% if total and done == total %}
   <div class="alert alert-ok">Все сотрудники отмечены.{% if sheet_on %} Данные ушли в зарплатную таблицу.{% endif %}</div>

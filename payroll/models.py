@@ -1,5 +1,8 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
+
+from staff.models import Employee
 
 
 class FineRules(models.Model):
@@ -74,6 +77,14 @@ class Attendance(models.Model):
         "Смена сотрудника", max_length=10, choices=Kind.choices, default=Kind.DAY,
         help_text="Полная — с начала дневной до конца ночной смены",
     )
+    position = models.CharField(
+        "Должность на смене", max_length=20, blank=True, choices=Employee.Position.choices,
+        help_text="Если человек вышел на замену и работал на другой должности. Пусто — его обычная должность.",
+    )
+    substitute_for = models.ForeignKey(
+        "staff.Employee", verbose_name="Вместо кого", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="replaced_by",
+    )
     arrived_at = models.DateTimeField("Пришёл в", null=True, blank=True)
     late_minutes = models.PositiveIntegerField("Опоздание, мин", default=0)
     reason = models.TextField("Причина опоздания или невыхода", blank=True)
@@ -110,6 +121,51 @@ class Attendance(models.Model):
         return sum(b.amount for b in self.bonuses.all())
 
     @property
+    def penalty_total(self) -> int:
+        return sum(p.amount for p in self.penalties.all())
+
+    @property
+    def fine_total(self) -> int:
+        """Весь штраф за смену: за опоздание или невыход плюс штрафы во время смены."""
+        return self.fine + self.penalty_total
+
+    @property
+    def fine_reasons(self) -> str:
+        reasons = []
+        if self.fine and self.status == self.Status.LATE:
+            reasons.append(f"опоздание {self.late_human} — {self.fine}")
+        elif self.fine and self.status == self.Status.ABSENT:
+            reasons.append(f"невыход — {self.fine}")
+        elif self.fine:
+            reasons.append(f"штраф — {self.fine}")
+        reasons += [f"{p.reason} — {p.amount}" for p in self.penalties.all()]
+        return "; ".join(reasons)
+
+    @property
+    def is_substitute(self) -> bool:
+        """Вышел на замену на чужой филиал (или из резерва)."""
+        return self.employee.point_id != self.shift.point_id
+
+    @property
+    def position_code(self) -> str:
+        return self.position or self.employee.position
+
+    @property
+    def position_display(self) -> str:
+        return dict(Employee.Position.choices).get(self.position_code, self.position_code)
+
+    @property
+    def substitute_text(self) -> str:
+        if not self.is_substitute and not self.substitute_for_id:
+            return ""
+        parts = []
+        if self.substitute_for_id:
+            parts.append(f"вместо {self.substitute_for}")
+        if self.is_substitute:
+            parts.append("из резерва" if not self.employee.point_id else f"с филиала {self.employee.point}")
+        return "Замена: " + ", ".join(parts)
+
+    @property
     def late_human(self) -> str:
         hours, minutes = divmod(self.late_minutes, 60)
         if hours:
@@ -134,3 +190,62 @@ class Bonus(models.Model):
 
     def __str__(self) -> str:
         return f"{self.amount} ₸ — {self.reason}"
+
+
+class Penalty(models.Model):
+    """Штраф во время смены: за что и сколько. Ставит администратор или шеф."""
+
+    attendance = models.ForeignKey(Attendance, on_delete=models.CASCADE, related_name="penalties", verbose_name="Выход")
+    amount = models.PositiveIntegerField("Сумма, ₸")
+    reason = models.CharField("За что", max_length=200)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, verbose_name="Кто поставил", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField("Когда", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Штраф во время смены"
+        verbose_name_plural = "Штрафы во время смены"
+        ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.amount} ₸ — {self.reason}"
+
+
+class Advance(models.Model):
+    """Аванс: деньги, выданные сотруднику заранее. Вычитается из зарплаты в таблице."""
+
+    employee = models.ForeignKey("staff.Employee", verbose_name="Сотрудник", on_delete=models.PROTECT,
+                                 related_name="advances")
+    point = models.ForeignKey("points.Point", verbose_name="Где выдан", on_delete=models.PROTECT, null=True,
+                              blank=True, related_name="+")
+    given_on = models.DateField("Дата", default=timezone.localdate)
+    amount = models.PositiveIntegerField("Сумма, ₸")
+    comment = models.CharField("Комментарий", max_length=200, blank=True)
+    given_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, verbose_name="Кто выдал", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+",
+    )
+    shift = models.ForeignKey("shifts.Shift", verbose_name="Смена", on_delete=models.SET_NULL, null=True, blank=True,
+                              related_name="advances")
+    created_at = models.DateTimeField("Записано", auto_now=True)
+
+    needs_sync = models.BooleanField("Ждёт выгрузки", default=True)
+    synced_at = models.DateTimeField("Выгружено в таблицу", null=True, blank=True)
+    sync_error = models.TextField("Ошибка выгрузки", blank=True)
+
+    class Meta:
+        verbose_name = "Аванс"
+        verbose_name_plural = "Авансы"
+        ordering = ["-given_on", "-id"]
+
+    def __str__(self) -> str:
+        return f"{self.employee} — {self.amount} ₸"
+
+
+class SheetDeletion(models.Model):
+    """Строка, которую нужно убрать из Google Таблицы (удалили аванс или замену, отметили «Выходной»)."""
+
+    key = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
