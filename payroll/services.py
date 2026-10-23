@@ -2,8 +2,10 @@
 Правила зарплатного учёта смены: кто вышел, опоздания, штрафы, бонусы.
 
 Администратор после отметки «Я пришёл» отмечает сотрудников: пришёл вовремя, опоздал
-(во сколько пришёл и почему) или не вышел (почему). Штраф считается сам по ступеням
-из панели. Бонус администратор ставит сам: сумма и за что.
+(во сколько пришёл и почему), не вышел (почему) или выходной (не его смена).
+Дневной администратор может отметить полную смену — до конца ночной; ночной администратор
+видит таких сотрудников уже отмеченными. Штраф считается сам по ступеням из панели.
+Бонус администратор ставит сам: сумма и за что.
 Каждое изменение сразу уходит в Google Таблицу (см. sheets.py).
 """
 
@@ -40,10 +42,28 @@ def employees_for(shift):
     )
 
 
+def full_from_day(shift) -> dict[int, Attendance]:
+    """Для ночной смены: кто с дневной смены остался на полную. {id сотрудника: отметка}."""
+    if shift.kind != shift.Kind.NIGHT:
+        return {}
+    records = Attendance.objects.filter(
+        shift__point=shift.point, shift__kind=shift.Kind.DAY, kind=Attendance.Kind.FULL,
+        status__in=Attendance.WORKED,
+        shift__planned_start__gte=shift.planned_start - timedelta(hours=24),
+        shift__planned_start__lt=shift.planned_start,
+    ).select_related("shift__admin")
+    return {a.employee_id: a for a in records}
+
+
 def marked_count(shift) -> tuple[int, int]:
     employees = employees_for(shift)
-    done = Attendance.objects.filter(shift=shift, employee__in=employees).count()
-    return done, employees.count()
+    ids = set(Attendance.objects.filter(shift=shift, employee__in=employees).values_list("employee_id", flat=True))
+    ids |= set(full_from_day(shift))
+    return len(ids & set(employees.values_list("id", flat=True))), employees.count()
+
+
+def can_be_full(shift) -> bool:
+    return shift.kind == shift.Kind.DAY and shift.point.has_night_shift
 
 
 def late_minutes_for(shift, arrived_at: datetime) -> int:
@@ -68,20 +88,27 @@ def parse_arrival(shift, value: str, now: datetime) -> datetime:
 
 @transaction.atomic
 def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", reason: str = "",
-         now: datetime | None = None) -> Attendance:
+         full: bool = False, now: datetime | None = None) -> Attendance:
     now = now or timezone.now()
     if employee.point_id != shift.point_id or employee.position == Employee.Position.ADMIN:
         raise PayrollError("Этого сотрудника нет в списке точки.")
     if status not in Attendance.Status.values:
-        raise PayrollError("Выберите: пришёл вовремя, опоздал или не вышел.")
+        raise PayrollError("Выберите: вовремя, опоздал, не вышел или выходной.")
+    if employee.id in full_from_day(shift):
+        raise PayrollError("Сотрудник на полной смене — его уже отметил дневной администратор.")
     reason = reason.strip()
     rules = FineRules.current()
     attendance = Attendance.objects.filter(shift=shift, employee=employee).first() or Attendance(
         shift=shift, employee=employee,
     )
     was_absent = attendance.pk and attendance.status == Attendance.Status.ABSENT
+    has_bonus = attendance.pk and attendance.bonuses.exists()
 
-    if status == Attendance.Status.ON_TIME:
+    if status == Attendance.Status.OFF:
+        if has_bonus:
+            raise PayrollError("У сотрудника есть бонус за эту смену. Сначала удалите бонус.")
+        arrived_at, minutes, reason, fine = None, 0, "", 0
+    elif status == Attendance.Status.ON_TIME:
         arrived_at, minutes, reason, fine = None, 0, "", 0
     elif status == Attendance.Status.LATE:
         arrived_at = parse_arrival(shift, arrived, now)
@@ -95,11 +122,13 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
     else:
         if not reason:
             raise PayrollError("Напишите, почему сотрудник не вышел.")
-        if attendance.pk and attendance.bonuses.exists():
+        if has_bonus:
             raise PayrollError("У сотрудника есть бонус за эту смену. Сначала удалите бонус.")
         arrived_at, minutes, fine = None, 0, rules.absence_fine
 
     attendance.status = status
+    worked = status in Attendance.WORKED
+    attendance.kind = Attendance.Kind.FULL if (full and worked and can_be_full(shift)) else shift.kind
     attendance.arrived_at = arrived_at
     attendance.late_minutes = minutes
     attendance.reason = reason
@@ -128,8 +157,8 @@ def add_bonus(attendance: Attendance, *, amount: str | int, reason: str, user) -
     reason = reason.strip()
     if not reason:
         raise PayrollError("Напишите, за что бонус.")
-    if attendance.status == Attendance.Status.ABSENT:
-        raise PayrollError("Сотрудник не вышел на смену — бонус поставить нельзя.")
+    if attendance.status not in Attendance.WORKED:
+        raise PayrollError("Сотрудник не работает в эту смену — бонус поставить нельзя.")
     bonus = Bonus.objects.create(attendance=attendance, amount=amount, reason=reason[:200], created_by=user)
     resync(attendance)
     return bonus
@@ -160,6 +189,7 @@ def record_admin(shift) -> Attendance:
         shift=shift, employee=employee,
     )
     attendance.status = Attendance.Status.LATE if shift.late_minutes else Attendance.Status.ON_TIME
+    attendance.kind = shift.kind
     attendance.arrived_at = shift.checked_in_at
     attendance.late_minutes = shift.late_minutes
     attendance.reason = shift.late_reason

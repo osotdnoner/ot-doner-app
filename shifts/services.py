@@ -48,20 +48,39 @@ class ShiftSlot:
     end: datetime
 
 
+def _span(day, start_time, end_time, tz) -> tuple[datetime, datetime]:
+    start = datetime.combine(day, start_time, tzinfo=tz)
+    end = datetime.combine(day, end_time, tzinfo=tz)
+    if end <= start:  # смена через полночь, например 18:00–02:00
+        end += timedelta(days=1)
+    return start, end
+
+
 def shift_slots_around(point: Point, now: datetime) -> list[ShiftSlot]:
-    """Смены точки со вчера по послезавтра, по порядку. Конец смены — начало следующей."""
+    """Смены точки со вчера по послезавтра, по порядку, со своими началом и концом."""
     tz = ZoneInfo(point.timezone)
     today = now.astimezone(tz).date()
-    starts = []
+    slots = []
     for offset in (-1, 0, 1, 2):
         day = today + timedelta(days=offset)
-        starts.append((Shift.Kind.DAY, datetime.combine(day, point.day_shift_start, tzinfo=tz)))
-        starts.append((Shift.Kind.NIGHT, datetime.combine(day, point.night_shift_start, tzinfo=tz)))
-    starts.sort(key=lambda item: item[1])
-    return [
-        ShiftSlot(kind=kind, start=start, end=next_start)
-        for (kind, start), (_, next_start) in zip(starts, starts[1:])
-    ]
+        start, end = _span(day, point.day_shift_start, point.day_shift_end, tz)
+        slots.append(ShiftSlot(kind=Shift.Kind.DAY, start=start, end=end))
+        if point.has_night_shift:
+            night_day = day if point.night_shift_start > point.day_shift_start else day + timedelta(days=1)
+            start, end = _span(night_day, point.night_shift_start, point.night_shift_end, tz)
+            slots.append(ShiftSlot(kind=Shift.Kind.NIGHT, start=start, end=end))
+    return sorted(slots, key=lambda s: s.start)
+
+
+def full_shift_span(point: Point, day_start: datetime) -> tuple[datetime, datetime]:
+    """Полная смена: с начала дневной до конца ночной (если ночной нет — до конца дневной)."""
+    tz = ZoneInfo(point.timezone)
+    day = day_start.astimezone(tz).date()
+    _, end = _span(day, point.day_shift_start, point.day_shift_end, tz)
+    if point.has_night_shift:
+        night_day = day if point.night_shift_start > point.day_shift_start else day + timedelta(days=1)
+        _, end = _span(night_day, point.night_shift_start, point.night_shift_end, tz)
+    return day_start, end
 
 
 def current_slot(point: Point, now: datetime, early_minutes: int | None = None) -> ShiftSlot | None:

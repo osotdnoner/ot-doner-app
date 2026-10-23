@@ -56,12 +56,24 @@ class Attendance(models.Model):
         ON_TIME = "on_time", "Пришёл вовремя"
         LATE = "late", "Опоздал"
         ABSENT = "absent", "Не вышел"
+        OFF = "off", "Выходной"  # не его смена: в зарплату не идёт
+
+    class Kind(models.TextChoices):
+        DAY = "day", "День"
+        NIGHT = "night", "Ночь"
+        FULL = "full", "Полная"
+
+    WORKED = (Status.ON_TIME, Status.LATE)
 
     shift = models.ForeignKey("shifts.Shift", verbose_name="Смена", on_delete=models.CASCADE, related_name="attendance")
     employee = models.ForeignKey(
         "staff.Employee", verbose_name="Сотрудник", on_delete=models.PROTECT, related_name="attendance",
     )
     status = models.CharField("Выход", max_length=10, choices=Status.choices)
+    kind = models.CharField(
+        "Смена сотрудника", max_length=10, choices=Kind.choices, default=Kind.DAY,
+        help_text="Полная — с начала дневной до конца ночной смены",
+    )
     arrived_at = models.DateTimeField("Пришёл в", null=True, blank=True)
     late_minutes = models.PositiveIntegerField("Опоздание, мин", default=0)
     reason = models.TextField("Причина опоздания или невыхода", blank=True)

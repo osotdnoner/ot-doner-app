@@ -31,8 +31,15 @@ class Point(models.Model):
     )
 
     timezone = models.CharField("Часовой пояс", max_length=50, default="Asia/Almaty")
-    day_shift_start = models.TimeField("Начало дневной смены", default=time(10, 0))
-    night_shift_start = models.TimeField("Начало ночной смены", default=time(22, 0))
+    day_shift_start = models.TimeField("Дневная смена: начало", default=time(10, 0))
+    day_shift_end = models.TimeField("Дневная смена: конец", default=time(22, 0))
+    has_night_shift = models.BooleanField("Есть ночная смена", default=True)
+    night_shift_start = models.TimeField("Ночная смена: начало", default=time(22, 0))
+    night_shift_end = models.TimeField(
+        "Ночная смена: конец", default=time(10, 0),
+        help_text="Если конец раньше начала (например 18:00–02:00), смена заканчивается на следующий день. "
+                  "Полная смена — с начала дневной до конца ночной.",
+    )
     late_grace_minutes = models.PositiveSmallIntegerField(
         "Допуск по опозданию, мин", default=0,
         help_text="0 — опоздание считается с первой минуты",
@@ -60,3 +67,9 @@ class Point(models.Model):
     def clean(self):
         if self.require_location and not self.has_coordinates:
             raise ValidationError("Чтобы проверять территорию, укажите широту и долготу точки.")
+
+    def schedule_text(self) -> str:
+        day = f"день {self.day_shift_start:%H:%M}–{self.day_shift_end:%H:%M}"
+        if not self.has_night_shift:
+            return day
+        return f"{day}, ночь {self.night_shift_start:%H:%M}–{self.night_shift_end:%H:%M}"

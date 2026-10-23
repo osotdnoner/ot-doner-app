@@ -9,7 +9,7 @@ services:
     plan: free
     region: frankfurt
     buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput
-    startCommand: python manage.py migrate --noinput && python manage.py demo_setup --if-empty && gunicorn config.wsgi:application --workers 2 --timeout 60
+    startCommand: python manage.py migrate --noinput && python manage.py demo_setup --if-empty && python manage.py setup_branches --with-demo-users && gunicorn config.wsgi:application --workers 2 --timeout 60
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.7"

@@ -11,13 +11,16 @@ class Employee(models.Model):
 
     class Position(models.TextChoices):
         ADMIN = "admin", "Администратор"
-        CASHIER = "cashier", "Кассир"
-        RUNNER = "runner", "Раннер"
         DONER = "doner", "Донерщик"
         PIZZA = "pizza", "Пиццерист"
+        CASHIER = "cashier", "Кассир"
+        RUNNER_DELIVERY = "runner_delivery", "Раннер доставки"
+        RUNNER = "runner", "Раннер кассы"
+        CLEANER = "cleaner", "Техперсонал"
+        CLEANER_KITCHEN = "cleaner_kitchen", "Техперсонал кухни"
+        CLEANER_HALL = "cleaner_hall", "Техперсонал зала"
         COOK = "cook", "Повар горячего цеха"
         OPERATOR = "operator", "Оператор"
-        CLEANER = "cleaner", "Технический персонал"
         OTHER = "other", "Другое"
 
     point = models.ForeignKey("points.Point", verbose_name="Точка", on_delete=models.PROTECT, related_name="employees")

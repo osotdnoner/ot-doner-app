@@ -11,7 +11,9 @@ from shifts.models import Shift
 
 from .models import Attendance, Bonus, FineRules
 from .templatetags.money import money
-from .services import PayrollError, add_bonus, employees_for, local, mark, marked_count, remove_bonus
+from .services import (
+    PayrollError, add_bonus, can_be_full, employees_for, full_from_day, local, mark, marked_count, remove_bonus,
+)
 
 
 def _own_open_shift(request, shift_id) -> Shift:
@@ -35,7 +37,8 @@ def attendance_page(request, shift_id: int):
         a.employee_id: a
         for a in Attendance.objects.filter(shift=shift).prefetch_related("bonuses")
     }
-    rows = [(e, records.get(e.id)) for e in employees_for(shift)]
+    from_day = full_from_day(shift)
+    rows = [(e, records.get(e.id), from_day.get(e.id)) for e in employees_for(shift)]
     done, total = marked_count(shift)
     rules = FineRules.current()
     return render(request, "payroll/attendance.html", {
@@ -48,6 +51,8 @@ def attendance_page(request, shift_id: int):
         "tiers": list(rules.tiers.all()),
         "absence_fine": rules.absence_fine,
         "sheet_on": bool(settings.GOOGLE_SHEET_URL),
+        "can_be_full": can_be_full(shift),
+        "full_end": shift.point.night_shift_end,
     })
 
 
@@ -60,6 +65,7 @@ def mark_view(request, shift_id: int, employee_id: int):
         attendance = mark(
             shift, employee, request.POST.get("status", ""), user=request.user,
             arrived=request.POST.get("arrived", ""), reason=request.POST.get("reason", ""),
+            full=request.POST.get("full") == "1",
         )
     except PayrollError as error:
         messages.error(request, f"{employee}: {error}")

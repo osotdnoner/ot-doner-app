@@ -1,10 +1,12 @@
 """
 Выгрузка зарплатных данных в Google Таблицу.
 
-Приложение отправляет строки на адрес Google Apps Script (веб-приложение внутри вашей таблицы),
-а скрипт записывает их на лист «Данные из приложения»: одна строка = один человек в одной смене.
+Приложение отправляет строки на адрес Google Apps Script (веб-приложение внутри таблицы),
+а скрипт записывает их на лист «Смены»: одна строка = один человек в одной смене.
 Если строка с таким ключом уже есть (админ поправил опоздание, шеф снял штраф), она обновляется.
-Код скрипта и как его поставить — в файле payroll/google_apps_script.js и в README.
+Если сотрудника переотметили как «Выходной», его строка удаляется.
+Ставки, суммы к выплате и итоги за 1–15 и 16–конец месяца считают формулы самой таблицы.
+Код скрипта — в файле payroll/google_apps_script.js, подключение — в README.
 
 Пока в .env не задан GOOGLE_SHEET_URL, данные копятся в приложении и уйдут, когда адрес появится.
 """
@@ -33,8 +35,8 @@ COLUMNS = [
     ("Ключ", lambda a: f"S{a.shift_id}-E{a.employee_id}"),
     # Дата в виде 2026-10-16: Google в любой стране понимает её как дату (для формул по месяцам)
     ("Дата", lambda a: f"{_local(a.shift.planned_start, a.shift.point):%Y-%m-%d}"),
-    ("Точка", lambda a: a.shift.point.name),
-    ("Смена", lambda a: a.shift.get_kind_display()),
+    ("Филиал", lambda a: a.shift.point.name),
+    ("Смена", lambda a: a.get_kind_display()),
     ("Сотрудник", lambda a: a.employee.full_name),
     ("Должность", lambda a: a.employee.get_position_display()),
     ("Выход", lambda a: a.get_status_display()),
@@ -55,6 +57,10 @@ def row(attendance) -> list:
     return [get(attendance) for _, get in COLUMNS]
 
 
+def key(attendance) -> str:
+    return COLUMNS[0][1](attendance)
+
+
 def push(ids: list[int]) -> tuple[int, str]:
     """Отправляет строки в таблицу. Возвращает (сколько отправлено, ошибка)."""
     from .models import Attendance
@@ -70,7 +76,12 @@ def push(ids: list[int]) -> tuple[int, str]:
     if not items:
         return 0, ""
     started = timezone.now()
-    payload = {"secret": settings.GOOGLE_SHEET_SECRET, "headers": HEADERS, "rows": [row(a) for a in items]}
+    payload = {
+        "secret": settings.GOOGLE_SHEET_SECRET,
+        "headers": HEADERS,
+        "rows": [row(a) for a in items if a.status != a.Status.OFF],
+        "delete": [key(a) for a in items if a.status == a.Status.OFF],
+    }
     error = ""
     try:
         response = requests.post(url, json=payload, timeout=30)

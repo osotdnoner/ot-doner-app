@@ -120,7 +120,7 @@ class MarkTests(TestCase):
 
     def test_no_bonus_for_absent(self):
         a = mark(self.shift, self.cashier, "absent", reason="Заболел", user=self.admin)
-        with self.assertRaisesMessage(PayrollError, "не вышел"):
+        with self.assertRaisesMessage(PayrollError, "не работает в эту смену"):
             add_bonus(a, amount=1000, reason="x", user=self.admin)
 
 
@@ -175,7 +175,7 @@ class SheetTests(TestCase):
             add_bonus(a, amount=2000, reason="Замена", user=self.admin)
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["secret"], "tajna")
-        self.assertEqual(payload["headers"][:4], ["Ключ", "Дата", "Точка", "Смена"])
+        self.assertEqual(payload["headers"][:4], ["Ключ", "Дата", "Филиал", "Смена"])
         row = dict(zip(payload["headers"], payload["rows"][0]))
         self.assertEqual(row["Ключ"], f"S{self.shift.id}-E{self.cashier.id}")
         self.assertEqual(row["Дата"], "2026-10-16")
@@ -297,3 +297,92 @@ class PanelTests(TestCase):
         rules = self.client.get(reverse("admin:payroll_finerules_changelist"), follow=True)
         self.assertContains(rules, "Штраф за невыход")
         self.assertContains(rules, "5000")
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", GOOGLE_SHEET_URL="")
+class FullShiftAndDayOffTests(TestCase):
+    """17 мкрн: день 10–18, ночь 18–02, полная смена 10–02."""
+
+    def setUp(self):
+        from datetime import time
+        self.point = Point.objects.create(
+            name="17 мкрн", day_shift_start=time(10), day_shift_end=time(18),
+            night_shift_start=time(18), night_shift_end=time(2),
+        )
+        self.day_admin = User.objects.create_user("87010000001", first_name="Ислам")
+        self.night_admin = User.objects.create_user("87010000002", first_name="Нурлан")
+        self.doner = Employee.objects.create(point=self.point, full_name="Ерлан", position="doner")
+        self.cashier = Employee.objects.create(point=self.point, full_name="Айдос", position="cashier")
+        self.day = Shift.objects.create(
+            point=self.point, admin=self.day_admin, kind=Shift.Kind.DAY, planned_start=at(10), planned_end=at(18),
+            checked_in_at=at(9, 55), selfie=fake_selfie(),
+        )
+        self.night = Shift.objects.create(
+            point=self.point, admin=self.night_admin, kind=Shift.Kind.NIGHT, planned_start=at(18),
+            planned_end=at(2, day=17), checked_in_at=at(17, 55), selfie=fake_selfie(),
+        )
+
+    def test_full_shift_is_visible_to_night_admin(self):
+        a = mark(self.day, self.doner, "on_time", full=True, user=self.day_admin, now=at(10, 5))
+        self.assertEqual(a.kind, "full")
+        mark(self.day, self.cashier, "on_time", user=self.day_admin, now=at(10, 5))
+        self.assertEqual(marked_count(self.night), (1, 2))  # Ерлан уже на полной смене
+        with self.assertRaisesMessage(PayrollError, "полной смене"):
+            mark(self.night, self.doner, "on_time", user=self.night_admin, now=at(18, 5))
+        b = mark(self.night, self.cashier, "off", user=self.night_admin, now=at(18, 5))
+        self.assertEqual((b.kind, b.fine), ("night", 0))
+        self.assertEqual(marked_count(self.night), (2, 2))
+
+    def test_night_admin_cannot_mark_full(self):
+        a = mark(self.night, self.cashier, "on_time", full=True, user=self.night_admin, now=at(18, 5))
+        self.assertEqual(a.kind, "night")
+
+    def test_point_without_night_has_no_full_shift(self):
+        from datetime import time
+        point = Point.objects.create(name="16 мкрн", day_shift_end=time(23), has_night_shift=False)
+        employee = Employee.objects.create(point=point, full_name="Бауыржан", position="cashier")
+        shift = Shift.objects.create(point=point, admin=self.day_admin, kind=Shift.Kind.DAY, planned_start=at(10, day=18),
+                                     planned_end=at(23, day=18), checked_in_at=at(9, 55, day=18), selfie=fake_selfie())
+        self.assertEqual(mark(shift, employee, "on_time", full=True, user=self.day_admin).kind, "day")
+
+    def test_day_off_has_no_bonus_and_no_fine(self):
+        a = mark(self.day, self.cashier, "off", user=self.day_admin)
+        self.assertEqual((a.fine, a.reason), (0, ""))
+        with self.assertRaisesMessage(PayrollError, "не работает в эту смену"):
+            add_bonus(a, amount=1000, reason="x", user=self.day_admin)
+
+    @override_settings(GOOGLE_SHEET_URL="https://script.google.com/macros/s/x/exec")
+    def test_day_off_removes_row_from_sheet(self):
+        with mock.patch("payroll.sheets.requests.post", return_value=sheet_response()) as post:
+            mark(self.day, self.doner, "on_time", full=True, user=self.day_admin, now=at(10, 5))
+            first = post.call_args.kwargs["json"]
+            mark(self.day, self.doner, "off", user=self.day_admin, now=at(10, 6))
+            second = post.call_args.kwargs["json"]
+        row = dict(zip(first["headers"], first["rows"][0]))
+        self.assertEqual((row["Филиал"], row["Смена"], row["Должность"]), ("17 мкрн", "Полная", "Донерщик"))
+        self.assertEqual((second["rows"], second["delete"]), ([], [f"S{self.day.id}-E{self.doner.id}"]))
+
+
+class BranchesTests(TestCase):
+    def test_setup_branches_is_repeatable(self):
+        from django.core.management import call_command
+        from io import StringIO
+        call_command("setup_branches", stdout=StringIO())
+        call_command("setup_branches", stdout=StringIO())
+        self.assertEqual(Point.objects.filter(name__endswith="мкрн").count(), 4)
+        p16 = Point.objects.get(name="16 мкрн")
+        self.assertFalse(p16.has_night_shift)
+        self.assertEqual(Point.objects.get(name="14 мкрн").schedule_text(), "день 12:00–18:00, ночь 18:00–02:00")
+
+    def test_slots_follow_branch_schedule(self):
+        from datetime import time
+        from shifts.services import current_slot, full_shift_span
+        p17 = Point.objects.create(name="17 мкрн", day_shift_end=time(18), night_shift_start=time(18), night_shift_end=time(2))
+        night = current_slot(p17, at(23, 30), early_minutes=60)
+        self.assertEqual((night.kind, night.start, night.end), ("night", at(18), at(2, day=17)))
+        self.assertIsNone(current_slot(p17, at(4), early_minutes=60))  # с 02:00 до 09:00 смены нет
+        self.assertEqual(current_slot(p17, at(9, 30), early_minutes=60).kind, "day")
+        self.assertEqual(full_shift_span(p17, at(10)), (at(10), at(2, day=17)))
+        p16 = Point.objects.create(name="16 мкрн", day_shift_end=time(23), has_night_shift=False)
+        self.assertEqual(current_slot(p16, at(22, 30), early_minutes=60).end, at(23))
+        self.assertIsNone(current_slot(p16, at(23, 30), early_minutes=60))

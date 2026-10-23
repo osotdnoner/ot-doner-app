@@ -225,3 +225,5 @@ h1 { font-size: 26px; margin: 4px 0 12px; }
 .bonus summary::-webkit-details-marker, .rules summary::-webkit-details-marker { display: none; }
 .rules { margin: 4px 0 14px; font-size: 15px; }
 .rules ul { margin: 6px 0 0; padding-left: 20px; color: var(--muted); }
+.segmented.four { display: grid; grid-template-columns: 1fr 1fr; }
+.segmented.kind span { font-size: 14px; }

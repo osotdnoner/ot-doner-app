@@ -4,7 +4,7 @@
 {% block content %}
 <a class="back" href="{% url 'home' %}">← На главную</a>
 <h1>Сотрудники на смене</h1>
-<p class="muted">Точка «{{ shift.point.name }}» · {{ shift.get_kind_display|lower }} смена с {{ start|time:"H:i" }} · отмечено {{ done }} из {{ total }}</p>
+<p class="muted">Филиал «{{ shift.point.name }}» · {{ shift.get_kind_display|lower }} смена с {{ start|time:"H:i" }} · отмечено {{ done }} из {{ total }}</p>
 <div class="progress"><div class="progress-bar" style="width: {% if total %}{% widthratio done total 100 %}{% else %}100{% endif %}%"></div></div>
 
 <details class="rules">
@@ -12,11 +12,25 @@
   <ul>
     {% for t in tiers %}<li>Опоздание от {{ t.minutes_from }} мин — {{ t.amount|money }}</li>{% empty %}<li>Штрафы за опоздание не заданы</li>{% endfor %}
     <li>Не вышел — {% if absence_fine %}{{ absence_fine|money }}{% else %}без автоматического штрафа, решает шеф{% endif %}</li>
+    <li>«Выходной» — сотрудник сегодня не в этой смене, в зарплату не идёт.</li>
+    {% if can_be_full %}<li>«Полная» — сотрудник остаётся до конца ночной смены ({{ full_end|time:"H:i" }}). Ночной администратор увидит его уже отмеченным.</li>{% endif %}
     <li>Бонус ставите вы: сумма и за что.{% if sheet_on %} Всё сразу уходит в зарплатную таблицу.{% endif %}</li>
   </ul>
 </details>
 
-{% for employee, a in rows %}
+{% for employee, a, from_day in rows %}
+  {% if from_day %}
+  <article class="item item-ok" id="emp-{{ employee.id }}">
+    <div class="item-head">
+      <div>
+        <div class="item-title">{{ employee.full_name }}</div>
+        <div class="item-hint">{{ employee.get_position_display }}</div>
+      </div>
+      <span class="pill pill-ok">Полная смена</span>
+    </div>
+    <div class="item-summary muted">С дневной смены, отметил {{ from_day.shift.admin }}.</div>
+  </article>
+  {% else %}
   <article class="item {% if a.status == 'on_time' %}item-ok{% elif a.status == 'late' %}item-deviation{% elif a.status == 'absent' %}item-critical{% endif %}" id="emp-{{ employee.id }}">
     <div class="item-head">
       <div>
@@ -24,8 +38,9 @@
         <div class="item-hint">{{ employee.get_position_display }}</div>
       </div>
       {% if not a %}<span class="pill pill-todo">Отметить</span>
-      {% elif a.status == "on_time" %}<span class="pill pill-ok">Вовремя</span>
-      {% elif a.status == "late" %}<span class="pill pill-deviation">Опоздал на {{ a.late_human }}</span>
+      {% elif a.status == "on_time" %}<span class="pill pill-ok">Вовремя{% if a.kind == "full" %} · полная{% endif %}</span>
+      {% elif a.status == "late" %}<span class="pill pill-deviation">Опоздал на {{ a.late_human }}{% if a.kind == "full" %} · полная{% endif %}</span>
+      {% elif a.status == "off" %}<span class="pill">Выходной</span>
       {% else %}<span class="pill pill-critical">Не вышел</span>{% endif %}
     </div>
 
@@ -45,10 +60,17 @@
 
     <form method="post" action="{% url 'attendance_mark' shift.id employee.id %}" class="mark-form" id="mark-{{ employee.id }}" {% if a %}hidden{% endif %}>
       {% csrf_token %}
-      <div class="segmented">
+      {% if can_be_full %}
+      <div class="segmented kind">
+        <label><input type="radio" name="full" value="0" {% if a.kind != "full" %}checked{% endif %}><span>День до {{ shift.point.day_shift_end|time:"H:i" }}</span></label>
+        <label><input type="radio" name="full" value="1" {% if a.kind == "full" %}checked{% endif %}><span>Полная до {{ full_end|time:"H:i" }}</span></label>
+      </div>
+      {% endif %}
+      <div class="segmented four">
         <label><input type="radio" name="status" value="on_time" {% if a.status == "on_time" %}checked{% endif %}><span>Вовремя</span></label>
         <label><input type="radio" name="status" value="late" {% if a.status == "late" %}checked{% endif %}><span>Опоздал</span></label>
         <label><input type="radio" name="status" value="absent" {% if a.status == "absent" %}checked{% endif %}><span>Не вышел</span></label>
+        <label><input type="radio" name="status" value="off" {% if a.status == "off" %}checked{% endif %}><span>Выходной</span></label>
       </div>
       <div class="late-part" hidden>
         <label class="field-label" for="arrived-{{ employee.id }}">Во сколько пришёл</label>
@@ -61,7 +83,7 @@
       <button type="submit" class="btn btn-primary save-mark" hidden>Сохранить</button>
     </form>
 
-    {% if a and a.status != "absent" %}
+    {% if a.status == "on_time" or a.status == "late" %}
       <details class="bonus">
         <summary>+ Бонус</summary>
         <form method="post" action="{% url 'attendance_bonus' shift.id employee.id %}">
@@ -75,6 +97,7 @@
       </details>
     {% endif %}
   </article>
+  {% endif %}
 {% empty %}
   <p class="hint">У точки нет сотрудников в списке. Управляющий добавляет их в панели: «Сотрудники» → «Добавить».</p>
 {% endfor %}
@@ -93,11 +116,12 @@
     const save = form.querySelector(".save-mark");
     function update(event) {
       const status = (form.querySelector("[name=status]:checked") || {}).value;
-      // «Вовремя» — одним нажатием, без кнопки «Сохранить»
-      if (status === "on_time" && event) { form.submit(); return; }
+      // «Вовремя» и «Выходной» — одним нажатием, без кнопки «Сохранить»
+      const quick = status === "on_time" || status === "off";
+      if (quick && event && event.target.name === "status") { form.submit(); return; }
       late.hidden = status !== "late";
-      reason.hidden = !status || status === "on_time";
-      save.hidden = !status || status === "on_time";
+      reason.hidden = !status || quick;
+      save.hidden = !status || quick;
       reason.querySelector("textarea").required = !reason.hidden;
       reason.querySelector("textarea").placeholder = status === "absent"
         ? "Например: заболел, не отвечает на звонки" : "Например: проспал, пробка";

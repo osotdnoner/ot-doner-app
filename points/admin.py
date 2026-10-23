@@ -5,7 +5,7 @@ from .models import Point
 
 @admin.register(Point)
 class PointAdmin(admin.ModelAdmin):
-    list_display = ("name", "address", "require_location", "radius_m", "day_shift_start", "night_shift_start", "late_grace_minutes", "is_active")
+    list_display = ("name", "address", "schedule", "require_location", "late_grace_minutes", "is_active")
     list_filter = ("is_active",)
     search_fields = ("name", "address")
     fieldsets = (
@@ -15,5 +15,12 @@ class PointAdmin(admin.ModelAdmin):
             "description": "Координаты входа: в 2ГИС или Google Maps нажмите на место правой кнопкой "
                            "и скопируйте два числа, например 43.238949, 76.889709.",
         }),
-        ("Смены", {"fields": ("timezone", "day_shift_start", "night_shift_start", "late_grace_minutes")}),
+        ("Смены", {"fields": (
+            ("day_shift_start", "day_shift_end"), "has_night_shift", ("night_shift_start", "night_shift_end"),
+            "late_grace_minutes", "timezone",
+        )}),
     )
+
+    @admin.display(description="Смены")
+    def schedule(self, obj):
+        return obj.schedule_text()
