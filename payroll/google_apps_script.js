@@ -177,13 +177,12 @@ function rebuild() {
   const book = SpreadsheetApp.getActiveSpreadsheet();
   const data = book.getSheetByName(DATA);
   if (data && data.getLastRow() > 1) throw new Error("На листе «Смены» уже есть данные — перестраивать нельзя.");
-  const keep = book.insertSheet("временный");
+  book.insertSheet("временный"); // в таблице всегда должен оставаться хотя бы один лист
   [TOTALS, DATA, RATES, HELP].forEach((name) => {
     const s = book.getSheetByName(name);
     if (s) book.deleteSheet(s);
   });
-  setup();
-  book.deleteSheet(keep);
+  setup(); // setup сам уберёт временный лист
 }
 
 // ---------------------------------------------------------------- построение таблицы
@@ -199,8 +198,11 @@ function setup() {
     const s = book.getSheetByName(name);
     if (s && s.getLastRow() === 0 && book.getSheets().length > 1) book.deleteSheet(s);
   });
+  [TOTALS, RATES, DATA, HELP].forEach((name, i) => {
+    book.setActiveSheet(book.getSheetByName(name));
+    book.moveActiveSheet(i + 1);
+  });
   book.setActiveSheet(book.getSheetByName(TOTALS));
-  book.moveActiveSheet(1);
 }
 
 function sheetNamed(book, name) {
