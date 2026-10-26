@@ -11,11 +11,11 @@ from django.views.decorators.http import require_POST
 from shifts.models import Shift
 from staff.models import Employee
 
-from .models import Advance, Attendance, Bonus, FineRules, Penalty
+from .models import Advance, Attendance, Bonus, ExtraHours, FineRules, Penalty
 from .services import (
-    PayrollError, add_advance, add_bonus, add_penalty, add_substitute, can_be_full, employees_for, full_from_day,
-    local, mark, marked_count, remove_advance, remove_bonus, remove_penalty, remove_substitute,
-    substitute_candidates, substitutes_on,
+    PayrollError, add_advance, add_bonus, add_hours, add_penalty, add_substitute, can_be_full, cover_late,
+    employees_for, full_from_day, local, mark, marked_count, remove_advance, remove_bonus, remove_hours,
+    remove_penalty, remove_substitute, stayed_candidates, substitute_candidates, substitutes_on,
 )
 from .templatetags.money import money
 
@@ -39,13 +39,15 @@ def attendance_page(request, shift_id: int):
         return redirect("home")
     records = {
         a.employee_id: a
-        for a in Attendance.objects.filter(shift=shift).prefetch_related("bonuses", "penalties")
+        for a in Attendance.objects.filter(shift=shift).prefetch_related("bonuses", "penalties", "extra_hours")
     }
     advances = {}
     for adv in Advance.objects.filter(shift=shift).order_by("id"):
         advances.setdefault(adv.employee_id, []).append(adv)
     for attendance in records.values():
         attendance.shift_advances = advances.get(attendance.employee_id, [])
+        if attendance.status == Attendance.Status.LATE:  # кто мог задержаться за опоздавшего
+            attendance.cover_candidates = list(stayed_candidates(attendance))
     from_day = full_from_day(shift)
     employees = list(employees_for(shift))
     for e in employees:
@@ -55,6 +57,8 @@ def attendance_page(request, shift_id: int):
     replaced = {a.substitute_for_id: a.employee for a in subs if a.substitute_for_id}
     for a in subs:
         a.employee.shift_advances = advances.get(a.employee_id, [])
+        if a.status == Attendance.Status.LATE:
+            a.cover_candidates = list(stayed_candidates(a))
     for e in employees:
         e.replaced_by_sub = replaced.get(e.id)
     done, total = marked_count(shift)
@@ -75,6 +79,7 @@ def attendance_page(request, shift_id: int):
         "candidates": substitute_candidates(shift),
         "own_employees": employees,
         "positions": [(v, label) for v, label in Employee.Position.choices if v != Employee.Position.ADMIN],
+        "hour_choices": [1, 2, 3],
     })
 
 
@@ -208,3 +213,55 @@ def substitute_remove_view(request, shift_id: int, attendance_id: int):
     except PayrollError as error:
         messages.error(request, str(error))
     return _back(shift)
+
+
+def _hours_from(post) -> str:
+    """Часы: кнопка 1/2/3 или своё число в поле «другое»."""
+    return (post.get("hours_other") or "").strip() or post.get("hours", "")
+
+
+@login_required
+@require_POST
+def hours_view(request, shift_id: int, employee_id: int):
+    shift = _own_open_shift(request, shift_id)
+    attendance = _attendance_or_404(shift, employee_id)
+    try:
+        entry = add_hours(attendance, kind=request.POST.get("kind", ""), hours=_hours_from(request.POST),
+                          reason=request.POST.get("reason", ""), user=request.user)
+    except PayrollError as error:
+        messages.error(request, f"{attendance.employee}: {error}")
+        return _back(shift, employee_id)
+    messages.success(request, f"{attendance.employee}: {entry.get_kind_display().lower()} {entry.hours} ч.")
+    return _back(shift, employee_id)
+
+
+@login_required
+@require_POST
+def cover_view(request, shift_id: int, employee_id: int):
+    """Опоздавший: кто задержался за него и на сколько часов."""
+    shift = _own_open_shift(request, shift_id)
+    late = _attendance_or_404(shift, employee_id)
+    helper = Attendance.objects.select_related("employee").filter(pk=request.POST.get("helper") or 0).first()
+    if helper is None:
+        messages.error(request, f"{late.employee}: выберите, кто задержался.")
+        return _back(shift, employee_id)
+    try:
+        over, _ = cover_late(late, helper, hours=_hours_from(request.POST), user=request.user)
+    except PayrollError as error:
+        messages.error(request, f"{late.employee}: {error}")
+        return _back(shift, employee_id)
+    messages.success(request, f"{helper.employee}: переработка {over.hours} ч, {late.employee}: недоработка {over.hours} ч.")
+    return _back(shift, employee_id)
+
+
+@login_required
+@require_POST
+def hours_delete_view(request, shift_id: int, entry_id: int):
+    shift = _own_open_shift(request, shift_id)
+    entry = get_object_or_404(
+        ExtraHours.objects.select_related("attendance"),
+        Q(attendance__shift=shift) | Q(pair__attendance__shift=shift), pk=entry_id,
+    )
+    employee_id = entry.attendance.employee_id if entry.attendance.shift_id == shift.id else entry.pair.attendance.employee_id
+    remove_hours(entry)
+    return _back(shift, employee_id)

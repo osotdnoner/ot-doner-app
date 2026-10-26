@@ -142,6 +142,23 @@ class Attendance(models.Model):
         return "; ".join(reasons)
 
     @property
+    def overtime_hours(self) -> int:
+        return sum(h.hours for h in self.extra_hours.all() if h.kind == ExtraHours.Kind.OVER)
+
+    @property
+    def undertime_hours(self) -> int:
+        return sum(h.hours for h in self.extra_hours.all() if h.kind == ExtraHours.Kind.UNDER)
+
+    @property
+    def hours_reasons(self) -> str:
+        return "; ".join(str(h) for h in self.extra_hours.all())
+
+    @property
+    def shift_hours(self) -> float:
+        """Сколько часов длится смена этого человека: из неё таблица считает цену часа."""
+        return self.shift.point.shift_hours(self.kind)
+
+    @property
     def is_substitute(self) -> bool:
         """Вышел на замену на чужой филиал (или из резерва)."""
         return self.employee.point_id != self.shift.point_id
@@ -211,6 +228,42 @@ class Penalty(models.Model):
 
     def __str__(self) -> str:
         return f"{self.amount} ₸ — {self.reason}"
+
+
+class ExtraHours(models.Model):
+    """
+    Переработка или недоработка в часах. Например, сменщик опоздал на час: первый повар
+    задержался — ему переработка 1 ч, опоздавшему недоработка 1 ч. Деньги считает таблица:
+    ставка ÷ часы смены × часы.
+    """
+
+    class Kind(models.TextChoices):
+        OVER = "over", "Переработка"
+        UNDER = "under", "Недоработка"
+
+    attendance = models.ForeignKey(Attendance, on_delete=models.CASCADE, related_name="extra_hours",
+                                   verbose_name="Выход")
+    kind = models.CharField("Что", max_length=10, choices=Kind.choices)
+    hours = models.PositiveSmallIntegerField("Часов")
+    reason = models.CharField("Почему", max_length=200, blank=True)
+    pair = models.ForeignKey(
+        "self", verbose_name="Связанная запись", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+        help_text="Переработка одного и недоработка другого, поставленные вместе («кто задержался за опоздавшего»)",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, verbose_name="Кто поставил", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField("Когда", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Переработка или недоработка"
+        verbose_name_plural = "Переработки и недоработки"
+        ordering = ["created_at", "id"]
+
+    def __str__(self) -> str:
+        text = f"{self.get_kind_display().lower()} {self.hours} ч"
+        return f"{text} — {self.reason}" if self.reason else text
 
 
 class Advance(models.Model):

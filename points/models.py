@@ -68,6 +68,20 @@ class Point(models.Model):
         if self.require_location and not self.has_coordinates:
             raise ValidationError("Чтобы проверять территорию, укажите широту и долготу точки.")
 
+    def shift_hours(self, kind: str) -> float:
+        """Длина смены в часах: day — дневная, night — ночная, full — с начала дневной до конца ночной."""
+        def length(start, end):
+            minutes = (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
+            return (minutes % (24 * 60)) or 24 * 60  # через полночь; 10:00–10:00 — сутки
+
+        if kind == "night" and self.has_night_shift:
+            minutes = length(self.night_shift_start, self.night_shift_end)
+        elif kind == "full" and self.has_night_shift:
+            minutes = length(self.day_shift_start, self.night_shift_end)
+        else:
+            minutes = length(self.day_shift_start, self.day_shift_end)
+        return round(minutes / 60, 2)
+
     def schedule_text(self) -> str:
         day = f"день {self.day_shift_start:%H:%M}–{self.day_shift_end:%H:%M}"
         if not self.has_night_shift:

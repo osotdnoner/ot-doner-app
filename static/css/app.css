@@ -230,6 +230,8 @@ h1 { font-size: 26px; margin: 4px 0 12px; }
 .money-line { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .money-line .link { font-weight: 400; font-size: 14px; flex: none; }
 .money-advance { color: var(--ink); }
+.money-hours { color: var(--ink); }
+.segmented.hours { margin: 6px 0 4px; }
 .money-actions { display: flex; flex-wrap: wrap; column-gap: 18px; }
 .money-actions details[open] { flex-basis: 100%; }
 .substitute { margin-top: 4px; }

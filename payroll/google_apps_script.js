@@ -4,17 +4,21 @@
  *
  * Этот скрипт живёт внутри Google Таблицы. Он:
  *  1) строит листы «Итоги», «Ставки», «Журнал», «Как пользоваться» с формулами (функция setup);
- *  2) принимает данные из приложения и записывает их на лист «Журнал» (функция doPost).
+ *  2) принимает данные из приложения (функция doPost): строки — на лист «Журнал»,
+ *     список сотрудников — на лист «Ставки».
  *
  * Строки «Журнала» двух видов:
  *  • «Смена» — один человек в одной смене: филиал, смена (день, ночь или полная), выход, опоздание,
- *    штрафы, бонусы, замена (вместо кого, с какого филиала или из резерва);
+ *    переработка и недоработка в часах, штрафы, бонусы, замена;
  *  • «Аванс» — деньги, выданные заранее.
  * Если админ поправил отметку или шеф снял штраф, строка обновляется. «Выходной», удалённая замена
- * или удалённый аванс — строка удаляется. Ставку, начислено, к выплате и итоги считают формулы.
+ * или удалённый аванс — строка удаляется.
  *
- * Если скрипт обновили (новая раскладка), выполните rebuild: листы перестроятся (ставки сохранятся),
- * а приложение отправит все данные заново.
+ * «Ставки» — у каждого сотрудника своя ставка за дневную, ночную и полную смену. Шеф вписывает их
+ * в жёлтые клетки. Цену часа, деньги за часы, начислено, к выплате и итоги считают формулы.
+ *
+ * Если скрипт обновили (новая раскладка), выполните rebuild: листы перестроятся, а приложение
+ * отправит все данные заново. Заполненные личные ставки сохраняются.
  *
  * Подключение (один раз):
  *  1. Таблица → Расширения → Apps Script → вставить этот код целиком.
@@ -30,25 +34,24 @@ const SECRET = "ВПИШИТЕ_СЕКРЕТНОЕ_СЛОВО";
 const DATA = "Журнал";
 const OLD_DATA = ["Смены"]; // старые названия листа с данными
 const RATES = "Ставки";
+const OLD_RATES = "Ставки по должностям (старые)";
 const TOTALS = "Итоги";
 const HELP = "Как пользоваться";
 
-// Колонки, которые присылает приложение (A–U). Порядок совпадает с payroll/sheets.py.
+// Колонки, которые присылает приложение (A–Z). Порядок совпадает с payroll/sheets.py.
 const HEADERS = [
   "Ключ", "Дата", "Филиал", "Что", "Смена", "Сотрудник", "Родной филиал", "Должность", "Выход", "Пришёл в",
-  "Опоздание, мин", "Причина", "Штраф, ₸", "За что штраф", "Бонус, ₸", "За что бонус", "Аванс, ₸", "Замена",
-  "Комментарий", "Кто отметил", "Обновлено",
+  "Опоздание, мин", "Причина", "Переработка, ч", "Недоработка, ч", "Часы: почему", "Штраф, ₸", "За что штраф",
+  "Бонус, ₸", "За что бонус", "Аванс, ₸", "Замена", "Комментарий", "Кто отметил", "Обновлено", "Часов в смене",
+  "Код сотрудника",
 ];
-// Что считают формулы (V–AA)
-const COMPUTED = ["Ставка, ₸", "Начислено, ₸", "К выплате, ₸", "Смен", "Опозданий", "Невыходов"];
+// Что считают формулы (AA–AH): ставка, цена часа, за часы, начислено, к выплате, смен, опозданий, невыходов
 
-// Филиалы и должности — для листа «Ставки». Новые сочетания скрипт добавит сам, когда придут данные.
-const BRANCHES = [
-  { name: "27 мкрн", night: true, positions: ["Донерщик", "Пиццерист", "Кассир", "Раннер доставки", "Раннер кассы", "Техперсонал"] },
-  { name: "16 мкрн", night: false, positions: ["Донерщик", "Кассир"] },
-  { name: "17 мкрн", night: true, positions: ["Донерщик", "Пиццерист", "Кассир", "Раннер кассы", "Техперсонал кухни", "Техперсонал зала"] },
-  { name: "14 мкрн", night: true, positions: ["Донерщик", "Пиццерист", "Кассир", "Раннер кассы", "Техперсонал"] },
-];
+// Лист «Ставки»: A код (скрыт) · B сотрудник · C родной филиал · D должность · E день · F ночь · G полная · H статус
+const RATE_HEADERS = ["Код", "Сотрудник", "Родной филиал", "Должность", "День, ₸", "Ночь, ₸", "Полная смена, ₸", "Статус"];
+
+// Филиалы — для итогов по филиалам
+const BRANCHES = ["27 мкрн", "16 мкрн", "17 мкрн", "14 мкрн"];
 
 const MONEY = "#,##0";
 const INPUT_BG = "#fff6d6";
@@ -66,6 +69,10 @@ function doPost(e) {
     }
     const book = SpreadsheetApp.getActiveSpreadsheet();
     if (!book.getSheetByName(DATA)) setup();
+
+    // 0. Список сотрудников → «Ставки» (имя, филиал, должность; ставки не трогаем)
+    const staffAdded = data.staff ? updateStaff(book, data.staff, true) : 0;
+
     const sheet = book.getSheetByName(DATA);
     const headers = data.headers || HEADERS;
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -95,8 +102,10 @@ function doPost(e) {
       sheet.getRange(r, 2).setNumberFormat("dd.mm.yyyy");
     });
 
-    addMissingRates(book, data.rows || []);
-    return reply({ ok: true, added: added, updated: updated, removed: removed });
+    // 3. Если человека ещё нет в «Ставках» (список не дошёл) — добавить по строке журнала
+    const fromRows = (data.rows || []).map((row) => [row[25], row[5], row[6], row[7], ""]).filter((s) => s[0]);
+    updateStaff(book, fromRows, false);
+    return reply({ ok: true, added: added, updated: updated, removed: removed, staff: staffAdded });
   } catch (err) {
     return reply({ ok: false, error: String(err) });
   } finally {
@@ -135,23 +144,43 @@ function toSerialDate(value) {
   return (Date.UTC(+m[1], +m[2] - 1, +m[3]) - Date.UTC(1899, 11, 30)) / 86400000;
 }
 
-function addMissingRates(book, rows) {
+/**
+ * Список сотрудников на листе «Ставки». staff — строки [код, имя, родной филиал, должность, статус].
+ * overwrite: обновлять ли имя, филиал, должность и статус у тех, кто уже есть. Ставки (E–G) не трогаются никогда.
+ * Возвращает, сколько людей добавлено.
+ */
+function updateStaff(book, staff, overwrite) {
   const sheet = book.getSheetByName(RATES);
-  if (!sheet || !rows.length) return;
+  if (!sheet || !staff.length) return 0;
   const last = sheet.getLastRow();
-  const existing = last > 1
-    ? sheet.getRange(2, 2, last - 1, 2).getValues().map((r) => r[0] + "|" + r[1])
-    : [];
-  rows.forEach((row) => {
-    if (row[3] !== "Смена") return; // ставка нужна только сменам, не авансам
-    const key = row[2] + "|" + row[7];
-    if (existing.indexOf(key) >= 0) return;
-    existing.push(key);
-    const r = sheet.getLastRow() + 1;
-    sheet.getRange(r, 2, 1, 2).setValues([[row[2], row[7]]]);
-    sheet.getRange(r, 6).setFormula(F("=D" + r + "+E" + r));
-    sheet.getRange(r, 4, 1, 3).setBackground(INPUT_BG).setNumberFormat(MONEY);
+  const n = Math.max(last - 1, 0);
+  const codes = n ? sheet.getRange(2, 1, n, 1).getValues().map((r) => String(r[0])) : [];
+  const info = n ? sheet.getRange(2, 2, n, 3).getValues() : [];
+  const status = n ? sheet.getRange(2, 8, n, 1).getValues() : [];
+  const fresh = [];
+  let changed = false;
+  staff.forEach((s) => {
+    const code = String(s[0]);
+    const i = codes.indexOf(code);
+    if (i < 0) {
+      codes.push(code);
+      fresh.push([code, s[1], s[2], s[3], "", "", "", s[4] || "работает"]);
+    } else if (overwrite) {
+      info[i] = [s[1], s[2], s[3]];
+      status[i] = [s[4] || ""];
+      changed = true;
+    }
   });
+  if (changed) {
+    sheet.getRange(2, 2, n, 3).setValues(info);
+    sheet.getRange(2, 8, n, 1).setValues(status);
+  }
+  if (fresh.length) {
+    sheet.getRange(last + 1, 1, fresh.length, RATE_HEADERS.length).setValues(fresh);
+    // По филиалу, потом по имени: новый сотрудник встаёт к своим
+    sheet.getRange(2, 1, n + fresh.length, RATE_HEADERS.length).sort([{ column: 3, ascending: true }, { column: 2, ascending: true }]);
+  }
+  return fresh.length;
 }
 
 // ---------------------------------------------------------------- формулы под язык таблицы
@@ -183,8 +212,9 @@ function F(formula) {
 }
 
 /**
- * Перестроить листы под новую версию скрипта. Ставки шефа сохраняются, а журнал и итоги
- * строятся заново — приложение отправит все отметки и авансы ещё раз (команда sync_sheet).
+ * Перестроить листы под новую версию скрипта. Журнал и итоги строятся заново — приложение отправит
+ * все отметки, авансы и список сотрудников ещё раз (команда sync_sheet). Личные ставки сохраняются.
+ * Старый лист ставок по должностям, если в нём что-то вписано, остаётся рядом под другим именем.
  */
 function rebuild() {
   const book = SpreadsheetApp.getActiveSpreadsheet();
@@ -193,7 +223,21 @@ function rebuild() {
     const s = book.getSheetByName(name);
     if (s) book.deleteSheet(s);
   });
+  const rates = book.getSheetByName(RATES);
+  if (rates && rates.getRange("B1").getValue() !== RATE_HEADERS[1]) { // старая раскладка: по должностям
+    if (hasRates(rates)) {
+      rates.setName(book.getSheetByName(OLD_RATES) ? OLD_RATES + " " + Date.now() : OLD_RATES);
+    } else {
+      book.deleteSheet(rates);
+    }
+  }
   setup(); // setup сам уберёт временный лист
+}
+
+function hasRates(sheet) {
+  const last = sheet.getLastRow();
+  if (last < 2) return false;
+  return sheet.getRange(2, 4, last - 1, 2).getValues().some((r) => r.some((v) => typeof v === "number" && v > 0));
 }
 
 // ---------------------------------------------------------------- построение таблицы
@@ -228,76 +272,69 @@ function buildData(book) {
   const sheet = sheetNamed(book, DATA);
   if (sheet.getLastRow() > 0) return; // уже построен — данные не трогаем
   sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
-  // Ставка: по филиалу, где работал (C), должности на смене (H) и виду смены (E). Авансам и невыходам — 0.
-  const key = "C2:C&\"|\"&H2:H";
-  const look = (col) => "VLOOKUP(" + key + ",'" + RATES + "'!A:F," + col + ",0)";
-  sheet.getRange("V1").setFormula(F(
-    '={"Ставка, ₸";ARRAYFORMULA(IF(A2:A="",,IF((D2:D<>"Смена")+(I2:I="Не вышел"),0,IFERROR(' +
-    'IF(E2:E="День",' + look(4) + ',IF(E2:E="Ночь",' + look(5) + ',' + look(6) + '))*1,0))))}'
-  ));
-  sheet.getRange("W1").setFormula(F('={"Начислено, ₸";ARRAYFORMULA(IF(A2:A="",,V2:V-M2:M+O2:O))}'));
-  sheet.getRange("X1").setFormula(F('={"К выплате, ₸";ARRAYFORMULA(IF(A2:A="",,W2:W-Q2:Q))}'));
-  sheet.getRange("Y1").setFormula(F('={"Смен";ARRAYFORMULA(IF(A2:A="",,IF((D2:D="Смена")*(I2:I<>"Не вышел"),1,0)))}'));
-  sheet.getRange("Z1").setFormula(F('={"Опозданий";ARRAYFORMULA(IF(A2:A="",,IF(I2:I="Опоздал",1,0)))}'));
-  sheet.getRange("AA1").setFormula(F('={"Невыходов";ARRAYFORMULA(IF(A2:A="",,IF(I2:I="Не вышел",1,0)))}'));
+  const arr = (title, body) => '={"' + title + '";ARRAYFORMULA(IF(A2:A="",,' + body + '))}';
+  // Ставка — личная, по коду сотрудника (Z) и виду смены (E). Авансам и невыходам — 0.
+  // Полная: своя сумма из «Ставок», а если она пустая — день + ночь.
+  const look = (col) => "VLOOKUP(Z2:Z,'" + RATES + "'!A:G," + col + ",0)";
+  sheet.getRange("AA1").setFormula(F(arr("Ставка, ₸",
+    'IF((D2:D<>"Смена")+(I2:I="Не вышел"),0,IFERROR(IF(E2:E="День",' + look(5) + ',IF(E2:E="Ночь",' + look(6) +
+    ',IF(' + look(7) + '="",' + look(5) + '+' + look(6) + ',' + look(7) + ')))*1,0))'
+  )));
+  // Цена часа = ставка ÷ часы смены; за часы = (переработка − недоработка) × цена часа
+  sheet.getRange("AB1").setFormula(F(arr("Цена часа, ₸", "IF(Y2:Y>0,AA2:AA/Y2:Y,0)")));
+  sheet.getRange("AC1").setFormula(F(arr("За часы, ₸", "ROUND((M2:M-N2:N)*AB2:AB)")));
+  sheet.getRange("AD1").setFormula(F(arr("Начислено, ₸", "AA2:AA+AC2:AC-P2:P+R2:R")));
+  sheet.getRange("AE1").setFormula(F(arr("К выплате, ₸", "AD2:AD-T2:T")));
+  sheet.getRange("AF1").setFormula(F(arr("Смен", 'IF((D2:D="Смена")*(I2:I<>"Не вышел"),1,0)')));
+  sheet.getRange("AG1").setFormula(F(arr("Опозданий", 'IF(I2:I="Опоздал",1,0)')));
+  sheet.getRange("AH1").setFormula(F(arr("Невыходов", 'IF(I2:I="Не вышел",1,0)')));
 
-  styleHeader(sheet.getRange("A1:AA1"));
-  sheet.getRange("V1:AA1").setBackground("#7c2d12");
+  styleHeader(sheet.getRange("A1:AH1"));
+  sheet.getRange("AA1:AH1").setBackground("#7c2d12");
   sheet.setFrozenRows(1);
   sheet.setFrozenColumns(1);
-  sheet.hideColumns(1); // ключ нужен только скрипту
+  sheet.hideColumns(1); // ключ строки нужен только скрипту
+  sheet.hideColumns(26); // код сотрудника — для поиска ставки
   sheet.getRange("B2:B").setNumberFormat("dd.mm.yyyy");
-  ["M2:M", "O2:O", "Q2:Q", "V2:X"].forEach((a1) => sheet.getRange(a1).setNumberFormat(MONEY));
-  const widths = { 2: 85, 3: 80, 4: 60, 5: 65, 6: 160, 7: 90, 8: 120, 9: 115, 10: 65, 11: 80, 12: 170, 13: 75,
-    14: 200, 15: 75, 16: 170, 17: 80, 18: 220, 19: 160, 20: 110, 21: 120, 22: 80, 23: 95, 24: 95, 25: 60, 26: 75, 27: 80 };
-  Object.keys(widths).forEach((c) => sheet.setColumnWidth(+c, widths[c]));
+  ["P2:P", "R2:R", "T2:T", "AA2:AE"].forEach((a1) => sheet.getRange(a1).setNumberFormat(MONEY));
+  sheet.getRange("M2:N").setNumberFormat("0");
+  sheet.getRange("Y2:Y").setNumberFormat("0.##");
+  const widths = [85, 80, 60, 65, 160, 90, 120, 115, 65, 80, 160, 85, 85, 200, 75, 200, 75, 170, 80, 220, 160,
+    110, 120, 70, 0, 80, 80, 80, 95, 95, 55, 75, 80];
+  widths.forEach((w, i) => { if (w) sheet.setColumnWidth(i + 2, w); });
   sheet.setRowHeight(1, 42);
 
   const rule = (formula, color) => SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formula)
-    .setBackground(color).setRanges([sheet.getRange("B2:AA")]).build();
+    .setBackground(color).setRanges([sheet.getRange("B2:AH")]).build();
   sheet.setConditionalFormatRules([
     rule('=$I2="Не вышел"', "#fdecea"),
     rule('=$I2="Опоздал"', "#fff6e0"),
     rule('=$D2="Аванс"', "#e8f0fe"),
-    rule('=$R2<>""', "#eaf7ee"),
+    rule('=$U2<>""', "#eaf7ee"),
   ]);
-  sheet.getRange("A1:AA").createFilter();
+  sheet.getRange("A1:AH").createFilter();
   sheet.protect().setDescription("Заполняет приложение ОТ Донер").setWarningOnly(true);
 }
 
 function buildRates(book) {
   const sheet = sheetNamed(book, RATES);
-  if (sheet.getLastRow() > 0) return;
-  sheet.getRange("A1").setFormula(F('={"Ключ";ARRAYFORMULA(IF(B2:B="",,B2:B&"|"&C2:C))}'));
-  sheet.getRange("B1:F1").setValues([["Филиал", "Должность", "День, ₸", "Ночь, ₸", "Полная смена, ₸"]]);
-  const rows = [];
-  BRANCHES.forEach((b) => {
-    rows.push([b.name, "Администратор", b.night]);
-    b.positions.forEach((p) => rows.push([b.name, p, b.night]));
-  });
-  rows.forEach((row, i) => {
-    const r = i + 2;
-    sheet.getRange(r, 2, 1, 2).setValues([[row[0], row[1]]]);
-    sheet.getRange(r, 6).setFormula(F(row[2] ? "=D" + r + "+E" + r : "=D" + r));
-    sheet.getRange(r, 4, 1, 3).setNumberFormat(MONEY);
-    sheet.getRange(r, 4).setBackground(INPUT_BG);
-    if (row[2]) {
-      sheet.getRange(r, 5).setBackground(INPUT_BG);
-    } else {
-      sheet.getRange(r, 5).setValue("нет ночи").setFontColor("#9a8f86");
-    }
-    sheet.getRange(r, 6).setBackground("#fdf2e2");
-  });
-  styleHeader(sheet.getRange("A1:F1"));
+  if (sheet.getLastRow() > 0) return; // уже есть — ставки шефа не трогаем
+  sheet.getRange(1, 1, 1, RATE_HEADERS.length).setValues([RATE_HEADERS]);
+  styleHeader(sheet.getRange(1, 1, 1, RATE_HEADERS.length));
   sheet.setFrozenRows(1);
   sheet.hideColumns(1);
-  sheet.setColumnWidth(2, 90);
-  sheet.setColumnWidth(3, 160);
-  sheet.setColumnWidths(4, 3, 120);
-  sheet.getRange("D1").setNote("Сколько платим за одну дневную смену. Впишите сумму в жёлтые клетки.");
-  sheet.getRange("E1").setNote("Сколько платим за одну ночную смену.");
-  sheet.getRange("F1").setNote("Полная смена (день + ночь, когда ночного персонала нет). " +
-    "По умолчанию = день + ночь. Если платите иначе — просто впишите свою сумму поверх формулы.");
+  sheet.getRange("E2:G").setNumberFormat(MONEY).setBackground(INPUT_BG);
+  sheet.setColumnWidth(2, 170);
+  sheet.setColumnWidth(3, 110);
+  sheet.setColumnWidth(4, 160);
+  sheet.setColumnWidths(5, 3, 115);
+  sheet.setColumnWidth(8, 90);
+  sheet.getRange("B1").setNote("Список ведёт приложение: новый сотрудник появляется здесь сам. " +
+    "Имя, филиал и должность меняйте в приложении (панель «Сотрудники»).");
+  sheet.getRange("E1").setNote("Сколько платим этому человеку за одну дневную смену.");
+  sheet.getRange("F1").setNote("Сколько платим за одну ночную смену.");
+  sheet.getRange("G1").setNote("Полная смена (с начала дневной до конца ночной). Пусто — считается день + ночь. " +
+    "Если платите иначе, впишите свою сумму.");
 }
 
 function buildTotals(book) {
@@ -306,7 +343,8 @@ function buildTotals(book) {
   sheet.getRange("A1:A4").setValues([["Месяц"], ["Период"], ["С"], ["По"]]).setFontWeight("bold");
   sheet.getRange("B1").setFormula(F("=EOMONTH(TODAY(),-1)+1")).setNumberFormat("mmmm yyyy").setBackground(INPUT_BG)
     .setNote("Любая дата нужного месяца. Сейчас стоит текущий месяц — впишите, например, 01.09.2026, чтобы посмотреть сентябрь.");
-  sheet.getRange("B2").setValue("1–15").setBackground(INPUT_BG).setDataValidation(
+  const today = new Date().getDate();
+  sheet.getRange("B2").setValue(today > 15 ? "16–конец месяца" : "1–15").setBackground(INPUT_BG).setDataValidation(
     SpreadsheetApp.newDataValidation().requireValueInList(["1–15", "16–конец месяца", "Весь месяц"], true).build()
   );
   sheet.getRange("B3").setFormula(F('=IF(B2="16–конец месяца",DATE(YEAR(B1),MONTH(B1),16),DATE(YEAR(B1),MONTH(B1),1))'));
@@ -317,37 +355,37 @@ function buildTotals(book) {
   sheet.getRange("D1:F1").setValues([["Филиал", "Начислено, ₸", "Авансы, ₸"]]);
   styleHeader(sheet.getRange("D1:F1"));
   const period = ",'" + DATA + "'!B:B,\">=\"&$B$3,'" + DATA + "'!B:B,\"<=\"&$B$4)";
-  BRANCHES.forEach((b, i) => {
+  BRANCHES.forEach((name, i) => {
     const r = i + 2;
-    sheet.getRange(r, 4).setValue(b.name);
-    sheet.getRange(r, 5).setFormula(F("=SUMIFS('" + DATA + "'!W:W,'" + DATA + "'!C:C,D" + r + period));
-    sheet.getRange(r, 6).setFormula(F("=SUMIFS('" + DATA + "'!Q:Q,'" + DATA + "'!C:C,D" + r + period));
+    sheet.getRange(r, 4).setValue(name);
+    sheet.getRange(r, 5).setFormula(F("=SUMIFS('" + DATA + "'!AD:AD,'" + DATA + "'!C:C,D" + r + period));
+    sheet.getRange(r, 6).setFormula(F("=SUMIFS('" + DATA + "'!T:T,'" + DATA + "'!C:C,D" + r + period));
   });
   const totalRow = BRANCHES.length + 2;
   sheet.getRange(totalRow, 4).setValue("Всего").setFontWeight("bold");
-  sheet.getRange(totalRow, 5).setFormula(F("=SUMIFS('" + DATA + "'!W:W" + period)).setFontWeight("bold");
-  sheet.getRange(totalRow, 6).setFormula(F("=SUMIFS('" + DATA + "'!Q:Q" + period)).setFontWeight("bold");
+  sheet.getRange(totalRow, 5).setFormula(F("=SUMIFS('" + DATA + "'!AD:AD" + period)).setFontWeight("bold");
+  sheet.getRange(totalRow, 6).setFormula(F("=SUMIFS('" + DATA + "'!T:T" + period)).setFontWeight("bold");
   sheet.getRange(2, 5, BRANCHES.length + 1, 2).setNumberFormat(MONEY);
 
-  // По каждому человеку за период: все его смены (и замены на других филиалах) и авансы
+  // По каждому человеку за период: все его смены (и замены на других филиалах), часы и авансы
   const start = totalRow + 2;
   sheet.getRange(start, 1).setValue("По сотрудникам за период").setFontWeight("bold").setFontSize(12);
-  const q = "select G, F, sum(Y), sum(Z), sum(AA), sum(V), sum(O), sum(M), sum(W), sum(Q), sum(X) " +
+  const q = "select G, F, sum(AF), sum(AG), sum(AH), sum(M), sum(N), sum(AA), sum(AC), sum(R), sum(P), sum(AD), sum(T), sum(AE) " +
     "where A is not null and B >= date '\"&TEXT($B$3,\"yyyy-mm-dd\")&\"' and B <= date '\"&TEXT($B$4,\"yyyy-mm-dd\")&\"' " +
     "group by G, F order by G, F " +
-    "label G 'Родной филиал', F 'Сотрудник', sum(Y) 'Смен', sum(Z) 'Опозданий', sum(AA) 'Невыходов', " +
-    "sum(V) 'По ставкам, ₸', sum(O) 'Бонусы, ₸', sum(M) 'Штрафы, ₸', sum(W) 'Начислено, ₸', " +
-    "sum(Q) 'Авансы, ₸', sum(X) 'К выплате, ₸'";
+    "label G 'Родной филиал', F 'Сотрудник', sum(AF) 'Смен', sum(AG) 'Опозданий', sum(AH) 'Невыходов', " +
+    "sum(M) 'Переработка, ч', sum(N) 'Недоработка, ч', sum(AA) 'По ставкам, ₸', sum(AC) 'За часы, ₸', " +
+    "sum(R) 'Бонусы, ₸', sum(P) 'Штрафы, ₸', sum(AD) 'Начислено, ₸', sum(T) 'Авансы, ₸', sum(AE) 'К выплате, ₸'";
   sheet.getRange(start + 1, 1).setFormula(F(
-    "=IFERROR(QUERY('" + DATA + "'!A:AA,\"" + q + "\",1),\"За этот период отметок пока нет\")"
+    "=IFERROR(QUERY('" + DATA + "'!A:AH,\"" + q + "\",1),\"За этот период отметок пока нет\")"
   ));
-  styleHeader(sheet.getRange(start + 1, 1, 1, 11));
-  sheet.getRange(start + 2, 6, 500, 6).setNumberFormat(MONEY);
+  styleHeader(sheet.getRange(start + 1, 1, 1, 14));
+  sheet.getRange(start + 2, 8, 500, 7).setNumberFormat(MONEY);
   sheet.setColumnWidth(1, 110);
   sheet.setColumnWidth(2, 150);
-  sheet.setColumnWidth(3, 130);
+  sheet.setColumnWidth(3, 120);
   sheet.setColumnWidth(4, 110);
-  sheet.setColumnWidths(5, 7, 105);
+  sheet.setColumnWidths(5, 10, 100);
 }
 
 function buildHelp(book) {
@@ -357,17 +395,21 @@ function buildHelp(book) {
     ["Зарплатная таблица «ОТ Донер»"],
     [""],
     ["«Итоги» — сколько платить каждому за период. Вверху выберите месяц и период: 1–15, 16–конец месяца или весь месяц."],
-    ["   По каждому человеку: смены (включая замены на других филиалах), опоздания, невыходы, ставки, бонусы, штрафы, авансы."],
-    ["«Ставки» — сколько платим за дневную, ночную и полную смену по каждой должности. Заполните жёлтые клетки."],
-    ["   Полная смена по умолчанию = день + ночь. Если платите иначе, впишите свою сумму поверх формулы."],
+    ["   По каждому человеку: смены (включая замены на других филиалах), опоздания, невыходы, переработка и недоработка,"],
+    ["   ставки, деньги за часы, бонусы, штрафы, авансы и итог к выплате."],
+    ["«Ставки» — у каждого сотрудника своя ставка за дневную, ночную и полную смену. Заполните жёлтые клетки."],
+    ["   Список сотрудников ведёт приложение: новый человек появляется здесь сам. Полная смена пустая = день + ночь."],
     ["«Журнал» — каждую строку заполняет приложение. Руками здесь ничего менять не нужно:"],
     ["   изменения делаются в приложении (шеф — в панели «Зарплата»)."],
-    ["   Строка «Смена» — кто вышел, на какую смену, опоздание, штрафы, бонусы, замена. Строка «Аванс» — выданные деньги."],
+    ["   Строка «Смена» — кто вышел, на какую смену, опоздание, часы, штрафы, бонусы, замена. «Аванс» — выданные деньги."],
     ["   Цвета: красный — не вышел, жёлтый — опоздал, зелёный — замена, голубой — аванс."],
     [""],
-    ["Как считается: Начислено за смену = ставка − штрафы + бонусы. К выплате = начислено − авансы."],
-    ["Замена получает ставку того филиала и должности, где работала. Если сотрудник не вышел, ставка 0."],
-    ["Штрафы за опоздание считает приложение по ступеням из панели «Зарплата → Правила штрафов»."],
+    ["Как считается:"],
+    ["   Цена часа = ставка ÷ часы смены. Например, 8 000 ₸ за смену 10:00–18:00 (8 часов) → 1 000 ₸ в час."],
+    ["   За часы = (переработка − недоработка) × цена часа."],
+    ["   Начислено = ставка + за часы − штрафы + бонусы. К выплате = начислено − авансы."],
+    ["   Замена получает свою личную ставку. Если сотрудник не вышел, ставка 0."],
+    ["   Штрафы за опоздание считает приложение по ступеням из панели «Зарплата → Правила штрафов»."],
   ];
   sheet.getRange(1, 1, lines.length, 1).setValues(lines);
   sheet.getRange("A1").setFontWeight("bold").setFontSize(14);

@@ -1,5 +1,6 @@
 """Автотесты зарплатного учёта: отметка сотрудников, штрафы, бонусы, выгрузка в таблицу."""
 
+import io
 from datetime import timedelta
 from unittest import mock
 
@@ -154,6 +155,13 @@ class AdminAttendanceTests(TestCase):
         self.assertEqual((a.status, a.fine), ("on_time", 0))
 
 
+def no_staff_sync(test):
+    """Список сотрудников для листа «Ставки» здесь не отправляем — он проверяется отдельно."""
+    patcher = mock.patch("payroll.sheets.queue_staff")
+    patcher.start()
+    test.addCleanup(patcher.stop)
+
+
 def sheet_response(ok=True, error=""):
     response = mock.Mock(ok=True, status_code=200)
     response.json.return_value = {"ok": ok, "error": error}
@@ -164,6 +172,7 @@ def sheet_response(ok=True, error=""):
                    GOOGLE_SHEET_SECRET="tajna")
 class SheetTests(TestCase):
     def setUp(self):
+        no_staff_sync(self)
         self.point = Point.objects.create(name="27")
         self.admin = User.objects.create_user("87010000001", first_name="Ислам")
         self.cashier = Employee.objects.create(point=self.point, full_name="Айдос", position="cashier")
@@ -289,11 +298,15 @@ class PanelTests(TestCase):
             "penalties-MAX_NUM_FORMS": "1000", "position": "",
             "bonuses-TOTAL_FORMS": "1", "bonuses-INITIAL_FORMS": "0", "bonuses-MIN_NUM_FORMS": "0",
             "bonuses-MAX_NUM_FORMS": "1000", "bonuses-0-amount": "3000", "bonuses-0-reason": "Лучший кассир недели",
+            "extra_hours-TOTAL_FORMS": "1", "extra_hours-INITIAL_FORMS": "0", "extra_hours-MIN_NUM_FORMS": "0",
+            "extra_hours-MAX_NUM_FORMS": "1000", "extra_hours-0-kind": "over", "extra_hours-0-hours": "2",
+            "extra_hours-0-reason": "Инвентаризация",
         }
         response = self.client.post(url, data)
         self.assertEqual(response.status_code, 302, response.content[:3000])
         a.refresh_from_db()
         self.assertEqual((a.fine, a.fine_manual, a.fine_note, a.bonus_total), (0, True, "Уважительная причина", 3000))
+        self.assertEqual((a.overtime_hours, a.extra_hours.get().created_by), (2, self.boss))
         self.assertEqual(Bonus.objects.get().created_by, self.boss)
         self.assertTrue(a.needs_sync)
 
@@ -418,6 +431,7 @@ class SheetCheckTests(TestCase):
                    GOOGLE_SHEET_SECRET="tajna")
 class SubstitutePenaltyAdvanceTests(TestCase):
     def setUp(self):
+        no_staff_sync(self)
         self.p27 = Point.objects.create(name="27 мкрн")
         self.p17 = Point.objects.create(name="17 мкрн")
         self.admin = User.objects.create_user("87010000001", password="test12345", first_name="Ислам")
@@ -559,3 +573,151 @@ class AdvancePanelTests(TestCase):
         advance = Advance.objects.get()
         self.assertEqual((advance.point, advance.given_by.username, advance.needs_sync), (point, "87000000000", True))
         self.assertContains(self.client.get(reverse("admin:payroll_advance_changelist")), "на лечение")
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", GOOGLE_SHEET_URL="https://script.google.com/macros/s/x/exec",
+                   GOOGLE_SHEET_SECRET="tajna")
+class ExtraHoursTests(TestCase):
+    """Переработка и недоработка: дневной повар задержался на час, потому что ночной опоздал."""
+
+    def setUp(self):
+        from datetime import time
+        no_staff_sync(self)
+        self.p17 = Point.objects.create(name="17 мкрн", day_shift_start=time(10), day_shift_end=time(18),
+                                        night_shift_start=time(18), night_shift_end=time(2))
+        self.day_admin = User.objects.create_user("87010000001", password="test12345", first_name="Ислам")
+        self.night_admin = User.objects.create_user("87010000002", password="test12345", first_name="Айдана")
+        self.day_cook = Employee.objects.create(point=self.p17, full_name="Ержан", position="doner")
+        self.night_cook = Employee.objects.create(point=self.p17, full_name="Назира", position="doner")
+        self.cashier = Employee.objects.create(point=self.p17, full_name="Айлин", position="cashier")
+        self.day = Shift.objects.create(point=self.p17, admin=self.day_admin, kind=Shift.Kind.DAY,
+                                        planned_start=at(10), planned_end=at(18), checked_in_at=at(10),
+                                        selfie=fake_selfie())
+        self.night = Shift.objects.create(point=self.p17, admin=self.night_admin, kind=Shift.Kind.NIGHT,
+                                          planned_start=at(18), planned_end=at(2, day=17), checked_in_at=at(18),
+                                          selfie=fake_selfie())
+        self.post = mock.patch("payroll.sheets.requests.post", return_value=sheet_response())
+        self.sent = self.post.start()
+        self.addCleanup(self.post.stop)
+
+    def rows(self):
+        p = self.sent.call_args.kwargs["json"]
+        return [dict(zip(p["headers"], r)) for r in p["rows"]]
+
+    def test_shift_length(self):
+        from datetime import time
+        self.assertEqual([self.p17.shift_hours(k) for k in ("day", "night", "full")], [8, 8, 16])
+        p27 = Point.objects.create(name="27 мкрн")  # 10–22 и 22–10
+        self.assertEqual([p27.shift_hours(k) for k in ("day", "night", "full")], [12, 12, 24])
+        p16 = Point.objects.create(name="16 мкрн", has_night_shift=False, day_shift_end=time(23))
+        self.assertEqual([p16.shift_hours(k) for k in ("day", "night", "full")], [13, 13, 13])
+
+    def test_row_has_hours_shift_length_and_code(self):
+        from .services import add_hours
+        a = mark(self.day, self.cashier, "on_time", user=self.day_admin, now=at(10, 5))
+        add_hours(a, kind="over", hours="2", reason="Инвентаризация", user=self.day_admin)
+        row = self.rows()[0]
+        self.assertEqual(len(row), len(sheets.HEADERS))
+        self.assertEqual((row["Переработка, ч"], row["Недоработка, ч"], row["Часы: почему"]),
+                         (2, 0, "переработка 2 ч — Инвентаризация"))
+        self.assertEqual((row["Часов в смене"], row["Код сотрудника"]), (8, f"E{self.cashier.id}"))
+
+    def test_cover_for_late_colleague(self):
+        from .services import cover_late, remove_hours, stayed_candidates
+        stayed = mark(self.day, self.day_cook, "on_time", user=self.day_admin, now=at(10, 5))
+        mark(self.day, self.cashier, "absent", reason="Заболела", user=self.day_admin, now=at(10, 5))
+        late = mark(self.night, self.night_cook, "late", arrived="19:00", reason="Пробка", user=self.night_admin,
+                    now=at(19, 5))
+        # задержаться мог только тот, кто работал на филиале к 18:00 (не вышедшая кассирша — нет)
+        self.assertEqual(list(stayed_candidates(late)), [stayed])
+        over, under = cover_late(late, stayed, hours="1", user=self.night_admin)
+        self.assertEqual((over.attendance, over.kind, over.hours, over.reason),
+                         (stayed, "over", 1, "задержался за Назира"))
+        self.assertEqual((under.attendance, under.kind, under.reason), (late, "under", "за него задержался Ержан"))
+        self.assertEqual((over.pair, under.pair), (under, over))
+        late.refresh_from_db()
+        self.assertEqual((late.fine, late.undertime_hours), (5000, 1))  # и штраф за опоздание (60 мин) остаётся
+        by_name = {r["Сотрудник"]: r for r in self.rows()}
+        self.assertEqual(by_name["Ержан"]["Переработка, ч"], 1)
+        # обе строки ушли в таблицу (последний запрос — по второй половине)
+        sent = [dict(zip(c.kwargs["json"]["headers"], r)) for c in self.sent.call_args_list for r in c.kwargs["json"]["rows"]]
+        self.assertTrue(any(r["Сотрудник"] == "Назира" and r["Недоработка, ч"] == 1 for r in sent))
+        # удаление одной половины убирает и вторую
+        remove_hours(under)
+        stayed.refresh_from_db()
+        self.assertEqual((stayed.overtime_hours, late.extra_hours.count()), (0, 0))
+        with self.assertRaisesMessage(PayrollError, "не работал на вашем филиале"):
+            other = Attendance.objects.get(employee=self.cashier)
+            cover_late(late, other, hours=1, user=self.night_admin)
+
+    def test_hours_validation_and_marks(self):
+        from .services import add_hours
+        a = mark(self.day, self.cashier, "on_time", user=self.day_admin, now=at(10, 5))
+        for bad in ("0", "13", "два", ""):
+            with self.assertRaises(PayrollError):
+                add_hours(a, kind="over", hours=bad, user=self.day_admin)
+        with self.assertRaisesMessage(PayrollError, "переработка или недоработка"):
+            add_hours(a, kind="x", hours=1, user=self.day_admin)
+        add_hours(a, kind="under", hours=1, reason="Ушла раньше", user=self.day_admin)
+        with self.assertRaisesMessage(PayrollError, "Сначала удалите их"):
+            mark(self.day, self.cashier, "off", user=self.day_admin)
+        off = mark(self.day, self.day_cook, "off", user=self.day_admin)
+        with self.assertRaisesMessage(PayrollError, "не работает в эту смену"):
+            add_hours(off, kind="over", hours=1, user=self.day_admin)
+
+    def test_night_admin_page(self):
+        from django.utils import timezone as tz
+        now = tz.now()
+        day = Shift.objects.create(point=self.p17, admin=self.day_admin, kind=Shift.Kind.DAY,
+                                   planned_start=now - timedelta(hours=9), planned_end=now - timedelta(hours=1),
+                                   checked_in_at=now - timedelta(hours=9), selfie=fake_selfie())
+        night = Shift.objects.create(point=self.p17, admin=self.night_admin, kind=Shift.Kind.NIGHT,
+                                     planned_start=now - timedelta(hours=1), planned_end=now + timedelta(hours=7),
+                                     checked_in_at=now - timedelta(hours=1), selfie=fake_selfie())
+        stayed = mark(day, self.day_cook, "on_time", user=self.day_admin, now=now - timedelta(hours=8))
+        arrived = f"{timezone.localtime(now - timedelta(minutes=10)):%H:%M}"
+        self.client.login(username="87010000002", password="test12345")
+        self.client.post(reverse("attendance_mark", args=[night.id, self.night_cook.id]),
+                         {"status": "late", "arrived": arrived, "reason": "Пробка"})
+        page = self.client.get(reverse("attendance", args=[night.id]))
+        self.assertContains(page, "+ Кто задержался за него")
+        self.assertContains(page, "Ержан · донерщик · дневная смена")
+        self.assertContains(page, "+ Переработка")
+        response = self.client.post(reverse("attendance_cover", args=[night.id, self.night_cook.id]),
+                                    {"helper": stayed.id, "hours": "2", "hours_other": ""}, follow=True)
+        self.assertContains(response, "Ержан: переработка 2 ч, Назира: недоработка 2 ч")
+        self.assertContains(response, "Недоработка 2 ч — за него задержался Ержан")
+        stayed.refresh_from_db()
+        self.assertEqual(stayed.overtime_hours, 2)
+        # своё число часов вместо кнопки
+        response = self.client.post(reverse("attendance_hours", args=[night.id, self.night_cook.id]),
+                                    {"kind": "over", "hours": "1", "hours_other": "4", "reason": "Ночная уборка"},
+                                    follow=True)
+        self.assertContains(response, "Переработка 4 ч — Ночная уборка")
+        # ночной админ может удалить связку со своей смены — у дневного повара часы тоже уходят
+        entry = stayed.extra_hours.get().pair
+        self.client.post(reverse("hours_delete", args=[night.id, entry.id]))
+        self.assertEqual(stayed.extra_hours.count(), 0)
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", GOOGLE_SHEET_URL="https://script.google.com/macros/s/x/exec",
+                   GOOGLE_SHEET_SECRET="tajna")
+class StaffListTests(TestCase):
+    def test_new_employee_goes_to_rates_sheet(self):
+        point = Point.objects.create(name="16 мкрн")
+        with mock.patch("payroll.sheets.requests.post", return_value=sheet_response()) as post:
+            e = Employee.objects.create(point=point, full_name="Айдос", position="cashier")
+            Employee.objects.create(point=None, full_name="Даурен", position="runner", is_active=False)
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual((payload["rows"], payload["delete"]), ([], []))
+        self.assertIn([f"E{e.id}", "Айдос", "16 мкрн", "Кассир", "работает"], payload["staff"])
+        self.assertIn("Резерв", [r[2] for r in payload["staff"]])
+        self.assertIn("уволен", [r[4] for r in payload["staff"]])
+
+    def test_sync_command_sends_staff_first(self):
+        from django.core.management import call_command
+        with mock.patch("payroll.sheets.requests.post", return_value=sheet_response()) as post:
+            Employee.objects.create(point=None, full_name="Даурен", position="runner")
+            post.reset_mock()
+            call_command("sync_sheet", stdout=io.StringIO())
+        self.assertIn("staff", post.call_args_list[0].kwargs["json"])

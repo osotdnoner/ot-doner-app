@@ -4,7 +4,7 @@ from django.urls import path
 from django.utils import timezone
 
 from . import sheets
-from .models import Advance, Attendance, Bonus, FineRules, LateFineTier, Penalty
+from .models import Advance, Attendance, Bonus, ExtraHours, FineRules, LateFineTier, Penalty
 
 
 class LateFineTierInline(admin.TabularInline):
@@ -39,14 +39,24 @@ class PenaltyInline(BonusInline):
     model = Penalty
 
 
+class ExtraHoursInline(admin.TabularInline):
+    model = ExtraHours
+    fk_name = "attendance"
+    extra = 0
+    fields = ("kind", "hours", "reason", "created_by", "created_at")
+    readonly_fields = ("created_by", "created_at")
+
+
 @admin.register(Attendance)
 class AttendanceAdmin(admin.ModelAdmin):
-    list_display = ("shift_date", "point", "employee", "status", "late_minutes", "fines", "bonus", "substitute", "in_sheet")
+    list_display = (
+        "shift_date", "point", "employee", "status", "late_minutes", "fines", "bonus", "hours", "substitute", "in_sheet",
+    )
     list_filter = ("status", "shift__point", "employee__position", "needs_sync")
     search_fields = ("employee__full_name", "reason")
     date_hierarchy = "shift__planned_start"
     list_select_related = ("shift__point", "employee")
-    inlines = [PenaltyInline, BonusInline]
+    inlines = [PenaltyInline, BonusInline, ExtraHoursInline]
     actions = ["send_to_sheet"]
     fields = (
         "shift", "employee", "status", "kind", "position", "substitute_for", "arrived_at", "late_minutes", "reason",
@@ -75,7 +85,7 @@ class AttendanceAdmin(admin.ModelAdmin):
         return redirect("admin:payroll_attendance_changelist")
 
     def get_queryset(self, request):
-        return super().get_queryset(request).prefetch_related("bonuses", "penalties")
+        return super().get_queryset(request).prefetch_related("bonuses", "penalties", "extra_hours")
 
     @admin.display(description="Дата", ordering="shift__planned_start")
     def shift_date(self, obj):
@@ -93,6 +103,15 @@ class AttendanceAdmin(admin.ModelAdmin):
     def fines(self, obj):
         return obj.fine_total or "—"
 
+    @admin.display(description="Часы ±")
+    def hours(self, obj):
+        parts = []
+        if obj.overtime_hours:
+            parts.append(f"+{obj.overtime_hours} ч")
+        if obj.undertime_hours:
+            parts.append(f"−{obj.undertime_hours} ч")
+        return " ".join(parts) or "—"
+
     @admin.display(description="Замена")
     def substitute(self, obj):
         return obj.substitute_text.replace("Замена: ", "") or "—"
@@ -108,13 +127,18 @@ class AttendanceAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
 
     def save_related(self, request, form, formsets, change):
-        for formset in formsets:  # бонусы и штрафы
+        from .services import remove_hours
+
+        for formset in formsets:  # бонусы, штрафы, часы
             for item in formset.save(commit=False):
                 if not item.created_by_id:
                     item.created_by = request.user
                 item.save()
             for item in formset.deleted_objects:
-                item.delete()
+                if isinstance(item, ExtraHours):
+                    remove_hours(item)  # и вторую половину связки «кто задержался»
+                else:
+                    item.delete()
         form.instance.needs_sync = True
         Attendance.objects.filter(pk=form.instance.pk).update(needs_sync=True, marked_at=timezone.now())
         sheets.queue([form.instance.pk])

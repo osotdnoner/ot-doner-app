@@ -6,6 +6,8 @@
 Дневной администратор может отметить полную смену — до конца ночной; ночной администратор
 видит таких сотрудников уже отмеченными. Штраф считается сам по ступеням из панели.
 Бонус, штраф во время смены и аванс администратор ставит сам: сумма и за что.
+Переработку и недоработку — в часах. Если сменщик опоздал и кто-то задержался за него, одно
+нажатие ставит переработку задержавшемуся и недоработку опоздавшему. Деньги за часы считает таблица.
 Если кто-то не вышел, админ вызывает замену: человека с другого филиала или из резерва (выручалку).
 Каждое изменение сразу уходит в Google Таблицу (см. sheets.py).
 """
@@ -21,9 +23,10 @@ from notifications.service import notify
 from staff.models import Employee
 
 from . import sheets
-from .models import Advance, Attendance, Bonus, FineRules, Penalty
+from .models import Advance, Attendance, Bonus, ExtraHours, FineRules, Penalty
 
 MAX_AMOUNT = 1_000_000
+MAX_HOURS = 12
 
 
 class PayrollError(Exception):
@@ -103,11 +106,13 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
         shift=shift, employee=employee,
     )
     was_absent = attendance.pk and attendance.status == Attendance.Status.ABSENT
-    has_bonus = attendance.pk and (attendance.bonuses.exists() or attendance.penalties.exists())
+    has_bonus = attendance.pk and (
+        attendance.bonuses.exists() or attendance.penalties.exists() or attendance.extra_hours.exists()
+    )
 
     if status == Attendance.Status.OFF:
         if has_bonus:
-            raise PayrollError("У сотрудника есть бонус или штраф за эту смену. Сначала удалите их.")
+            raise PayrollError("У сотрудника есть бонус, штраф или часы за эту смену. Сначала удалите их.")
         arrived_at, minutes, reason, fine = None, 0, "", 0
     elif status == Attendance.Status.ON_TIME:
         arrived_at, minutes, reason, fine = None, 0, "", 0
@@ -124,7 +129,7 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
         if not reason:
             raise PayrollError("Напишите, почему сотрудник не вышел.")
         if has_bonus:
-            raise PayrollError("У сотрудника есть бонус или штраф за эту смену. Сначала удалите их.")
+            raise PayrollError("У сотрудника есть бонус, штраф или часы за эту смену. Сначала удалите их.")
         arrived_at, minutes, fine = None, 0, rules.absence_fine
 
     attendance.status = status
@@ -198,6 +203,85 @@ def remove_penalty(penalty: Penalty):
     resync(attendance)
 
 
+def parse_hours(value) -> int:
+    try:
+        hours = int(str(value).strip())
+    except ValueError:
+        raise PayrollError("Выберите, сколько часов: 1, 2 или 3.")
+    if not 0 < hours <= MAX_HOURS:
+        raise PayrollError(f"Часов — от 1 до {MAX_HOURS}.")
+    return hours
+
+
+def add_hours(attendance: Attendance, *, kind: str, hours, reason: str = "", user) -> ExtraHours:
+    """Переработка (задержался после смены) или недоработка (пришёл позже, ушёл раньше) в часах."""
+    if kind not in ExtraHours.Kind.values:
+        raise PayrollError("Выберите: переработка или недоработка.")
+    hours = parse_hours(hours)
+    _require_worked(attendance, "переработку" if kind == ExtraHours.Kind.OVER else "недоработку")
+    entry = ExtraHours.objects.create(
+        attendance=attendance, kind=kind, hours=hours, reason=reason.strip()[:200], created_by=user,
+    )
+    resync(attendance)
+    return entry
+
+
+def stayed_candidates(attendance: Attendance):
+    """
+    Кто мог задержаться за опоздавшего: те, кто работал на этом филиале, когда его смена началась —
+    люди с предыдущей смены (дневной повар до 18:00, а ночной опоздал) или с этой же.
+    """
+    shift = attendance.shift
+    return (
+        Attendance.objects.filter(
+            shift__point=shift.point, status__in=Attendance.WORKED,
+            shift__planned_start__lte=shift.planned_start, shift__planned_end__gte=shift.planned_start,
+        )
+        .exclude(pk=attendance.pk)
+        .select_related("employee", "shift")
+        .order_by("shift__planned_start", "employee__full_name")
+    )
+
+
+@transaction.atomic
+def cover_late(late: Attendance, helper: Attendance, *, hours, user) -> tuple[ExtraHours, ExtraHours]:
+    """Сменщик опоздал, кто-то задержался за него: переработка задержавшемуся, недоработка опоздавшему."""
+    hours = parse_hours(hours)
+    _require_worked(late, "недоработку")
+    if not stayed_candidates(late).filter(pk=helper.pk).exists():
+        raise PayrollError("Этот сотрудник не работал на вашем филиале, когда началась смена опоздавшего.")
+    under = ExtraHours.objects.create(
+        attendance=late, kind=ExtraHours.Kind.UNDER, hours=hours, created_by=user,
+        reason=f"за него задержался {helper.employee}"[:200],
+    )
+    over = ExtraHours.objects.create(
+        attendance=helper, kind=ExtraHours.Kind.OVER, hours=hours, created_by=user, pair=under,
+        reason=f"задержался за {late.employee}"[:200],
+    )
+    under.pair = over
+    under.save(update_fields=["pair"])
+    resync(late)
+    resync(helper)
+    return over, under
+
+
+def _hours_pair(entry: ExtraHours) -> ExtraHours | None:
+    return entry.pair or ExtraHours.objects.filter(pair=entry).first()
+
+
+@transaction.atomic
+def remove_hours(entry: ExtraHours):
+    """Удалить часы. Если их ставили связкой «кто задержался», удаляется и вторая половина."""
+    touched = [entry.attendance]
+    pair = _hours_pair(entry)
+    if pair is not None:
+        touched.append(pair.attendance)
+        pair.delete()
+    entry.delete()
+    for attendance in touched:
+        resync(attendance)
+
+
 def add_advance(employee: Employee, *, amount: str | int, comment: str = "", user, shift=None,
                 point=None) -> Advance:
     """Аванс: деньги заранее. Вычитается из суммы к выплате в таблице."""
@@ -234,7 +318,8 @@ def substitutes_on(shift):
     return (
         Attendance.objects.filter(shift=shift).exclude(employee__point=shift.point)
         .exclude(employee__position=Employee.Position.ADMIN)
-        .select_related("employee__point", "substitute_for").prefetch_related("bonuses", "penalties")
+        .select_related("employee__point", "substitute_for")
+        .prefetch_related("bonuses", "penalties", "extra_hours")
     )
 
 
@@ -269,6 +354,12 @@ def remove_substitute(attendance: Attendance):
     if not attendance.is_substitute:
         raise PayrollError("Это сотрудник вашего филиала: поставьте ему «Выходной».")
     key = sheets.shift_key(attendance)
+    for entry in attendance.extra_hours.all():  # вторая половина связки у другого человека — тоже убрать
+        pair = _hours_pair(entry)
+        if pair is not None and pair.attendance_id != attendance.pk:
+            other = pair.attendance
+            pair.delete()
+            resync(other)
     attendance.delete()
     sheets.queue(deletes=[key])
 
