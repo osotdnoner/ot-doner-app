@@ -416,10 +416,10 @@ function buildPayout(book) {
   const sheet = sheetNamed(book, PAYOUT);
   if (sheet.getLastRow() > 0) return;
   const T = "'" + TOTALS + "'";
-  sheet.getRange("A1").setValue("Выплата зарплаты").setFontWeight("bold").setFontSize(14);
+  sheet.getRange("B1").setValue("Выплата зарплаты").setFontWeight("bold").setFontSize(14);
   sheet.getRange("B2").setFormula(F('="Период: "&TEXT(' + T + '!B3,"dd.mm.yyyy")&" – "&TEXT(' + T + '!B4,"dd.mm.yyyy")'))
     .setFontWeight("bold");
-  sheet.getRange("C2").setValue("Период меняется на листе «Итоги».").setFontColor("#7a6f66");
+  sheet.getRange("E2").setValue("Месяц и период меняются на листе «Итоги».").setFontColor("#7a6f66");
   sheet.getRange("B3").setValue("Итого к выплате:").setFontWeight("bold");
   sheet.getRange("C3").setFormula(F('=SUMIF(F6:F,">0")')).setNumberFormat(MONEY + ' "₸"').setFontWeight("bold");
   sheet.getRange("D3").setFormula(F('=COUNTIF(I6:I,"?*")&" — проверить"')).setFontColor("#b42318");
@@ -452,6 +452,14 @@ function buildPayout(book) {
   sheet.setColumnWidth(8, 150);
   sheet.setColumnWidth(9, 150);
   sheet.protect().setDescription("Считается само из «Журнала» и «Ставок»").setWarningOnly(true);
+}
+
+/** Перестроить только лист «Выплата» (он считается формулами — данные не теряются). */
+function rebuildPayout() {
+  const book = SpreadsheetApp.getActiveSpreadsheet();
+  const old = book.getSheetByName(PAYOUT);
+  if (old) book.deleteSheet(old);
+  setup();
 }
 
 function buildHelp(book) {
