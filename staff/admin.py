@@ -28,8 +28,8 @@ class EmployeeAdmin(admin.ModelAdmin):
         (None, {"fields": ("full_name", "point", "position", "phone", "is_active")}),
         ("Kaspi Gold — для выплаты зарплаты", {
             "fields": ("kaspi_phone", "kaspi_name"),
-            "description": "Попадает в Google Таблицу на лист «Выплата»: бухгалтер видит номер и имя получателя "
-                           "рядом с суммой к выплате.",
+            "description": "Попадает в Google Таблицу на листы «Сотрудники» и «Выплата»: бухгалтер видит номер "
+                           "и имя получателя рядом с суммой к выплате.",
         }),
         ("Аккаунт администратора", {"fields": ("user",), "classes": ("collapse",)}),
     )
