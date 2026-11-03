@@ -113,6 +113,8 @@ function doPost(e) {
     // 3. Если человека ещё нет в «Ставках» (список не дошёл) — добавить по строке журнала
     const fromRows = (data.rows || []).map((row) => [row[25], row[5], row[6], row[7], ""]).filter((s) => s[0]);
     updateStaff(book, fromRows, false);
+    // 4. Вышел не на свою обычную должность (кассир на раннере) — строка для отдельной ставки, если нужна
+    addRoleRates(book, (data.rows || []).filter((row) => row[3] === "Смена" && row[25]));
     return reply({ ok: true, added: added, updated: updated, removed: removed, staff: staffAdded });
   } catch (err) {
     return reply({ ok: false, error: String(err) });
@@ -157,6 +159,41 @@ function toSerialDate(value) {
  * overwrite: обновлять ли имя, филиал, должность, статус и Kaspi у тех, кто уже есть. Ставки (E–G) не трогаются никогда.
  * Возвращает, сколько людей добавлено.
  */
+/**
+ * Человек вышел не на свою обычную должность — в «Ставках» появляется строка «Имя — должность»
+ * (код «E5|Раннер кассы»). Пустая — платится его обычная ставка; шеф вписывает сумму, только если
+ * за эту должность платит иначе.
+ */
+function addRoleRates(book, rows) {
+  const sheet = book.getSheetByName(RATES);
+  if (!sheet || !rows.length) return;
+  const last = sheet.getLastRow();
+  if (last < 2) return;
+  const table = sheet.getRange(2, 1, last - 1, 4).getValues(); // код, имя, филиал, должность
+  const codes = table.map((r) => String(r[0]));
+  const fresh = [];
+  rows.forEach((row) => {
+    const code = String(row[25]);
+    const i = codes.indexOf(code);
+    if (i < 0 || table[i][3] === row[7]) return; // нет человека или это его обычная должность
+    const key = code + "|" + row[7];
+    if (codes.indexOf(key) >= 0) return;
+    codes.push(key);
+    fresh.push([key, table[i][1], table[i][2], row[7], "", "", "", "другая должность", "", ""]);
+  });
+  if (!fresh.length) return;
+  sheet.getRange(last + 1, 1, fresh.length, RATE_HEADERS.length).setValues(fresh);
+  sortRates(sheet);
+}
+
+function sortRates(sheet) {
+  const last = sheet.getLastRow();
+  if (last < 3) return;
+  // По филиалу и имени; строка «другая должность» — сразу под обычной (по коду: E5 < E5|…)
+  sheet.getRange(2, 1, last - 1, RATE_HEADERS.length)
+    .sort([{ column: 3, ascending: true }, { column: 2, ascending: true }, { column: 1, ascending: true }]);
+}
+
 function updateStaff(book, staff, overwrite) {
   const sheet = book.getSheetByName(RATES);
   if (!sheet || !staff.length) return 0;
@@ -180,14 +217,22 @@ function updateStaff(book, staff, overwrite) {
     }
   });
   if (changed) {
+    // строки «другая должность» берут имя и филиал у основной строки человека
+    codes.slice(0, n).forEach((code, i) => {
+      if (code.indexOf("|") < 0) return;
+      const main = codes.indexOf(code.split("|")[0]);
+      if (main >= 0 && main < n) {
+        info[i] = [info[main][0], info[main][1], info[i][2]];
+        extra[i] = [extra[i][0], "", ""];
+      }
+    });
     sheet.getRange(2, 2, n, 3).setValues(info);
     sheet.getRange(2, 8, n, 3).setValues(extra);
   }
   if (fresh.length) {
     sheet.getRange(last + 1, 1, fresh.length, RATE_HEADERS.length).setValues(fresh);
-    // По филиалу, потом по имени: новый сотрудник встаёт к своим
-    sheet.getRange(2, 1, n + fresh.length, RATE_HEADERS.length).sort([{ column: 3, ascending: true }, { column: 2, ascending: true }]);
   }
+  if (fresh.length || changed) sortRates(sheet); // новый сотрудник встаёт к своим
   return fresh.length;
 }
 
@@ -277,14 +322,22 @@ function styleHeader(range) {
   range.setFontWeight("bold").setBackground(HEAD_BG).setFontColor("#ffffff").setVerticalAlignment("middle").setWrap(true);
 }
 
-function buildData(book) {
-  const sheet = sheetNamed(book, DATA);
-  if (sheet.getLastRow() > 0) return; // уже построен — данные не трогаем
-  sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+/**
+ * Формулы журнала (строка заголовков, колонки AA–AI). Ставятся и при постройке, и при обновлении
+ * скрипта (setup) — данные при этом не трогаются.
+ */
+function journalFormulas(sheet) {
   const arr = (title, body) => '={"' + title + '";ARRAYFORMULA(IF(A2:A="",,' + body + '))}';
-  // Ставка — личная, по коду сотрудника (Z) и виду смены (E). Авансам и невыходам — 0.
+  // Ключ ставки: если для этого человека на этой должности в «Ставках» вписана отдельная ставка
+  // (строка «код|должность», например кассир сегодня на раннере) — берём её, иначе его обычную.
+  const alt = "Z2:Z&\"|\"&H2:H";
+  const altLook = (col) => "VLOOKUP(" + alt + ",'" + RATES + "'!A:G," + col + ",0)";
+  sheet.getRange("AI1").setFormula(F(arr("Ключ ставки",
+    'IF(IFERROR(' + altLook(5) + '&' + altLook(6) + '&' + altLook(7) + ',"")<>"",' + alt + ',Z2:Z)'
+  )));
+  // Ставка — по ключу ставки (AI) и виду смены (E). Авансам и невыходам — 0.
   // Полная: своя сумма из «Ставок», а если она пустая — день + ночь.
-  const look = (col) => "VLOOKUP(Z2:Z,'" + RATES + "'!A:G," + col + ",0)";
+  const look = (col) => "VLOOKUP(AI2:AI,'" + RATES + "'!A:G," + col + ",0)";
   sheet.getRange("AA1").setFormula(F(arr("Ставка, ₸",
     'IF((D2:D<>"Смена")+(I2:I="Не вышел"),0,IFERROR(IF(E2:E="День",' + look(5) + ',IF(E2:E="Ночь",' + look(6) +
     ',IF(' + look(7) + '="",' + look(5) + '+' + look(6) + ',' + look(7) + ')))*1,0))'
@@ -297,6 +350,19 @@ function buildData(book) {
   sheet.getRange("AF1").setFormula(F(arr("Смен", 'IF((D2:D="Смена")*(I2:I<>"Не вышел"),1,0)')));
   sheet.getRange("AG1").setFormula(F(arr("Опозданий", 'IF(I2:I="Опоздал",1,0)')));
   sheet.getRange("AH1").setFormula(F(arr("Невыходов", 'IF(I2:I="Не вышел",1,0)')));
+  styleHeader(sheet.getRange("AI1"));
+  sheet.getRange("AI1").setBackground("#7c2d12");
+  sheet.hideColumns(35); // ключ ставки — служебный
+}
+
+function buildData(book) {
+  const sheet = sheetNamed(book, DATA);
+  if (sheet.getLastRow() > 0) {
+    journalFormulas(sheet); // уже построен — данные не трогаем, только обновляем формулы
+    return;
+  }
+  sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+  journalFormulas(sheet);
 
   styleHeader(sheet.getRange("A1:AH1"));
   sheet.getRange("AA1:AH1").setBackground("#7c2d12");
@@ -476,6 +542,8 @@ function buildHelp(book) {
     ["   Бухгалтеру можно дать доступ к таблице или скачать лист: Файл → Скачать → PDF или Excel."],
     ["«Ставки» — у каждого сотрудника своя ставка за дневную, ночную и полную смену. Заполните жёлтые клетки."],
     ["   Kaspi Gold и имя в Kaspi вписываются в приложении: панель → «Сотрудники» → карточка сотрудника."],
+    ["   Если человек вышел не на свою должность (кассир на раннере кассы), под ним появится строка"],
+    ["   «другая должность». Пустая — платится его обычная ставка. Впишите сумму, только если за неё платите иначе."],
     ["   Список сотрудников ведёт приложение: новый человек появляется здесь сам. Полная смена пустая = день + ночь."],
     ["«Журнал» — каждую строку заполняет приложение. Руками здесь ничего менять не нужно:"],
     ["   изменения делаются в приложении (шеф — в панели «Зарплата»)."],

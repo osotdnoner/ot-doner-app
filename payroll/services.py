@@ -92,7 +92,11 @@ def parse_arrival(shift, value: str, now: datetime) -> datetime:
 
 @transaction.atomic
 def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", reason: str = "",
-         full: bool = False, now: datetime | None = None) -> Attendance:
+         full: bool = False, position: str = "", now: datetime | None = None) -> Attendance:
+    """
+    Отметка сотрудника. position — кем он работает именно в эту смену, если не по своей обычной должности
+    (например, кассир сегодня на раннере кассы). Пусто — обычная должность.
+    """
     now = now or timezone.now()
     if employee.point_id != shift.point_id or employee.position == Employee.Position.ADMIN:
         raise PayrollError("Этого сотрудника нет в списке точки.")
@@ -100,6 +104,8 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
         raise PayrollError("Выберите: вовремя, опоздал, не вышел или выходной.")
     if employee.id in full_from_day(shift):
         raise PayrollError("Сотрудник на полной смене — его уже отметил дневной администратор.")
+    if position and (position not in Employee.Position.values or position == Employee.Position.ADMIN):
+        raise PayrollError("Выберите должность из списка.")
     reason = reason.strip()
     rules = FineRules.current()
     attendance = Attendance.objects.filter(shift=shift, employee=employee).first() or Attendance(
@@ -135,6 +141,7 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
     attendance.status = status
     worked = status in Attendance.WORKED
     attendance.kind = Attendance.Kind.FULL if (full and worked and can_be_full(shift)) else shift.kind
+    attendance.position = position if (worked and position != employee.position) else ""
     attendance.arrived_at = arrived_at
     attendance.late_minutes = minutes
     attendance.reason = reason

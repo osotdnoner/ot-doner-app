@@ -92,11 +92,13 @@ def mark_view(request, shift_id: int, employee_id: int):
         attendance = mark(
             shift, employee, request.POST.get("status", ""), user=request.user,
             arrived=request.POST.get("arrived", ""), reason=request.POST.get("reason", ""),
-            full=request.POST.get("full") == "1",
+            full=request.POST.get("full") == "1", position=request.POST.get("position", ""),
         )
     except PayrollError as error:
         messages.error(request, f"{employee}: {error}")
         return _back(shift, employee.id)
+    if attendance.position:
+        messages.info(request, f"{employee}: сегодня {attendance.position_display.lower()}.")
     if attendance.fine:
         messages.warning(request, f"{employee}: штраф {money(attendance.fine)}.")
     return _back(shift, employee.id)

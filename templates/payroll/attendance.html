@@ -13,6 +13,7 @@
     {% for t in tiers %}<li>Опоздание от {{ t.minutes_from }} мин — {{ t.amount|money }}</li>{% empty %}<li>Штрафы за опоздание не заданы</li>{% endfor %}
     <li>Не вышел — {% if absence_fine %}{{ absence_fine|money }}{% else %}без автоматического штрафа, решает шеф{% endif %}</li>
     <li>«Выходной» — сотрудник сегодня не в этой смене, в зарплату не идёт.</li>
+    <li>«Кем работает сегодня» — если человек вышел не на свою обычную должность (кассир на раннере). Выберите до отметки.</li>
     {% if can_be_full %}<li>«Полная» — сотрудник остаётся до конца ночной смены ({{ full_end|time:"H:i" }}). Ночной администратор увидит его уже отмеченным.</li>{% endif %}
     <li>Бонус ставите вы: сумма и за что.{% if sheet_on %} Всё сразу уходит в зарплатную таблицу.{% endif %}</li>
     <li>Переработка и недоработка — в часах. Час стоит как ставка сотрудника, делённая на часы смены.
@@ -37,7 +38,7 @@
     <div class="item-head">
       <div>
         <div class="item-title">{{ employee.full_name }}</div>
-        <div class="item-hint">{{ employee.get_position_display }}</div>
+        <div class="item-hint">{% if a.position %}Сегодня: <strong>{{ a.position_display }}</strong> · обычно {{ employee.get_position_display|lower }}{% else %}{{ employee.get_position_display }}{% endif %}</div>
       </div>
       {% if not a %}<span class="pill pill-todo">Отметить</span>
       {% elif a.status == "on_time" %}<span class="pill pill-ok">Вовремя{% if a.kind == "full" %} · полная{% endif %}</span>
@@ -61,6 +62,12 @@
         <label><input type="radio" name="full" value="1" {% if a.kind == "full" %}checked{% endif %}><span>Полная до {{ full_end|time:"H:i" }}</span></label>
       </div>
       {% endif %}
+      <label class="pos-line">
+        <span>Кем работает сегодня</span>
+        <select name="position" class="pos-select">
+          {% for value, label in positions %}<option value="{{ value }}" {% if a and a.position_code == value %}selected{% elif not a and employee.position == value %}selected{% endif %}>{{ label }}{% if value == employee.position %} (обычно){% endif %}</option>{% endfor %}
+        </select>
+      </label>
       <div class="segmented four">
         <label><input type="radio" name="status" value="on_time" {% if a.status == "on_time" %}checked{% endif %}><span>Вовремя</span></label>
         <label><input type="radio" name="status" value="late" {% if a.status == "late" %}checked{% endif %}><span>Опоздал</span></label>
@@ -154,9 +161,11 @@
     const save = form.querySelector(".save-mark");
     function update(event) {
       const status = (form.querySelector("[name=status]:checked") || {}).value;
-      // «Вовремя» и «Выходной» — одним нажатием, без кнопки «Сохранить»
+      // «Вовремя» и «Выходной» — одним нажатием, без кнопки «Сохранить».
+      // Должность поменяли у уже отмеченного «Вовремя» — тоже сохраняем сразу.
       const quick = status === "on_time" || status === "off";
-      if (quick && event && event.target.name === "status") { form.submit(); return; }
+      const changed = event && (event.target.name === "status" || event.target.name === "position");
+      if (quick && changed) { form.submit(); return; }
       late.hidden = status !== "late";
       reason.hidden = !status || quick;
       save.hidden = !status || quick;

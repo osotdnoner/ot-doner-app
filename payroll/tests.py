@@ -756,3 +756,55 @@ class KaspiTests(TestCase):
         self.assertNotContains(page, "Ержан Б.")
         page = self.client.get(reverse("admin:staff_employee_changelist") + "?kaspi=yes")
         self.assertContains(page, "+7 777 123 45 67 · Ержан Б.")
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", GOOGLE_SHEET_URL="https://script.google.com/macros/s/x/exec",
+                   GOOGLE_SHEET_SECRET="tajna")
+class TodayPositionTests(TestCase):
+    """Сабина — кассир, но сегодня вышла раннером кассы."""
+
+    def setUp(self):
+        no_staff_sync(self)
+        self.point = Point.objects.create(name="17 мкрн")
+        self.admin = User.objects.create_user("87010000001", password="test12345", first_name="Ислам")
+        self.admin.points.add(self.point)
+        self.sabina = Employee.objects.create(point=self.point, full_name="Сабина", position="cashier")
+        self.shift = day_shift(self.point, self.admin)
+        self.post = mock.patch("payroll.sheets.requests.post", return_value=sheet_response())
+        self.sent = self.post.start()
+        self.addCleanup(self.post.stop)
+
+    def row(self):
+        p = self.sent.call_args.kwargs["json"]
+        return dict(zip(p["headers"], p["rows"][0]))
+
+    def test_position_for_one_shift(self):
+        a = mark(self.shift, self.sabina, "on_time", position="runner", user=self.admin, now=at(10, 5))
+        self.assertEqual((a.position, a.position_display), ("runner", "Раннер кассы"))
+        self.assertEqual(self.row()["Должность"], "Раннер кассы")
+        self.sabina.refresh_from_db()
+        self.assertEqual(self.sabina.position, "cashier")  # обычная должность не меняется
+        # обратно на кассу (или поле не прислали) — обычная должность
+        a = mark(self.shift, self.sabina, "on_time", position="cashier", user=self.admin, now=at(10, 5))
+        self.assertEqual((a.position, self.row()["Должность"]), ("", "Кассир"))
+        a = mark(self.shift, self.sabina, "off", position="runner", user=self.admin)
+        self.assertEqual(a.position, "")
+        for bad in ("admin", "boss"):
+            with self.assertRaisesMessage(PayrollError, "должность из списка"):
+                mark(self.shift, self.sabina, "on_time", position=bad, user=self.admin)
+
+    def test_staff_page_select(self):
+        now = timezone.now()
+        live = Shift.objects.create(point=self.point, admin=self.admin, kind=Shift.Kind.DAY,
+                                    planned_start=now - timedelta(hours=1), planned_end=now + timedelta(hours=8),
+                                    checked_in_at=now - timedelta(hours=1), selfie=fake_selfie())
+        self.client.login(username="87010000001", password="test12345")
+        page = self.client.get(reverse("attendance", args=[live.id]))
+        self.assertContains(page, "Кем работает сегодня")
+        self.assertContains(page, '<option value="cashier" selected>Кассир (обычно)</option>', html=True)
+        self.assertNotContains(page, '<option value="admin"')
+        response = self.client.post(reverse("attendance_mark", args=[live.id, self.sabina.id]),
+                                    {"status": "on_time", "position": "runner"}, follow=True)
+        self.assertContains(response, "Сабина: сегодня раннер кассы.")
+        self.assertContains(response, "Сегодня: <strong>Раннер кассы</strong> · обычно кассир")
+        self.assertContains(response, '<option value="runner" selected>Раннер кассы</option>', html=True)

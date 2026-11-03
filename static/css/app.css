@@ -232,6 +232,8 @@ h1 { font-size: 26px; margin: 4px 0 12px; }
 .money-advance { color: var(--ink); }
 .money-hours { color: var(--ink); }
 .segmented.hours { margin: 6px 0 4px; }
+.pos-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: 14px; color: var(--muted); }
+.pos-select { font: inherit; font-size: 15px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); max-width: 60%; }
 .money-actions { display: flex; flex-wrap: wrap; column-gap: 18px; }
 .money-actions details[open] { flex-basis: 100%; }
 .substitute { margin-top: 4px; }
