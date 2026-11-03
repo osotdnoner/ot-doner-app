@@ -3,6 +3,7 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from notifications.service import send_test
 
+from .forms import UserAddForm
 from .models import User
 
 
@@ -13,6 +14,7 @@ class UserAdmin(BaseUserAdmin):
     search_fields = ("username", "first_name", "last_name")
     filter_horizontal = ("points", "groups", "user_permissions")
     actions = ["send_test_message"]
+    add_form = UserAddForm
 
     fieldsets = (
         (None, {"fields": ("username", "password")}),
@@ -30,10 +32,19 @@ class UserAdmin(BaseUserAdmin):
     add_fieldsets = (
         (None, {
             "classes": ("wide",),
-            "fields": ("username", "first_name", "last_name", "role", "password1", "password2"),
-            "description": "Логин — номер телефона, например 87011234567.",
+            "fields": ("username", "first_name", "last_name", "role", "points", "password1", "password2"),
+            "description": "Логин — номер телефона, например 87011234567 (можно ввести и с +7). "
+                           "Пароль придумайте сами и передайте человеку лично.",
         }),
     )
+
+    def save_model(self, request, obj, form, change):
+        # Управляющий и собственник заходят в панель, администратор смены — только в приложение
+        if obj.role in (User.Role.MANAGER, User.Role.OWNER):
+            obj.is_staff = True
+        elif not obj.is_superuser:
+            obj.is_staff = False
+        super().save_model(request, obj, form, change)
 
     @admin.display(description="Точки")
     def points_list(self, obj):

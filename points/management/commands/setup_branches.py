@@ -50,8 +50,9 @@ class Command(BaseCommand):
             self.stdout.write(f"{'Создан' if created else 'Обновлён'} филиал «{point}»: {point.schedule_text()}")
 
         if opts["with_demo_users"]:
+            # Только пока у тестовых пользователей нет точек: если шеф убрал им точки — не возвращаем
             for username in ("87000000000", "87000000001"):
                 user = User.objects.filter(username=username).first()
-                if user:
+                if user and not user.points.exists():
                     user.points.add(*points)
-            self.stdout.write("Тестовые администратор и управляющий закреплены за всеми филиалами.")
+                    self.stdout.write(f"Тестовый пользователь {username} закреплён за всеми филиалами.")
