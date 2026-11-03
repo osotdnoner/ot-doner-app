@@ -58,8 +58,11 @@ def employee_key(employee) -> str:
 
 
 def staff_row(e) -> list:
-    """Строка листа «Ставки»: код, имя, родной филиал, должность, работает ли."""
-    return [employee_key(e), e.full_name, e.home, e.get_position_display(), "работает" if e.is_active else "уволен"]
+    """Строка листа «Ставки»: код, имя, родной филиал, должность, работает ли, Kaspi Gold и имя в Kaspi."""
+    return [
+        employee_key(e), e.full_name, e.home, e.get_position_display(), "работает" if e.is_active else "уволен",
+        e.kaspi_phone, e.kaspi_name,
+    ]
 
 
 def shift_row(a) -> list:

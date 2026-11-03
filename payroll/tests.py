@@ -710,7 +710,7 @@ class StaffListTests(TestCase):
             Employee.objects.create(point=None, full_name="Даурен", position="runner", is_active=False)
         payload = post.call_args.kwargs["json"]
         self.assertEqual((payload["rows"], payload["delete"]), ([], []))
-        self.assertIn([f"E{e.id}", "Айдос", "16 мкрн", "Кассир", "работает"], payload["staff"])
+        self.assertIn([f"E{e.id}", "Айдос", "16 мкрн", "Кассир", "работает", "", ""], payload["staff"])
         self.assertIn("Резерв", [r[2] for r in payload["staff"]])
         self.assertIn("уволен", [r[4] for r in payload["staff"]])
 
@@ -721,3 +721,38 @@ class StaffListTests(TestCase):
             post.reset_mock()
             call_command("sync_sheet", stdout=io.StringIO())
         self.assertIn("staff", post.call_args_list[0].kwargs["json"])
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", GOOGLE_SHEET_URL="https://script.google.com/macros/s/x/exec",
+                   GOOGLE_SHEET_SECRET="tajna")
+class KaspiTests(TestCase):
+    def test_phone_is_normalized(self):
+        from django.core.exceptions import ValidationError
+        from staff.models import normalize_kz_phone
+        for raw in ("8 777 123 45 67", "+7 (777) 123-45-67", "77771234567", "7771234567"):
+            self.assertEqual(normalize_kz_phone(raw), "+7 777 123 45 67")
+        self.assertEqual(normalize_kz_phone("  "), "")
+        for bad in ("123", "+7 727 123 45 67", "8 777 123 45 6"):
+            with self.assertRaises(ValidationError):
+                normalize_kz_phone(bad)
+
+    def test_boss_fills_kaspi_and_it_goes_to_sheet(self):
+        point = Point.objects.create(name="17 мкрн")
+        User.objects.create_superuser("87000000000", password="test12345", role=User.Role.OWNER)
+        self.client.login(username="87000000000", password="test12345")
+        form = {"full_name": "Ержан", "point": point.id, "position": "doner", "phone": "", "is_active": "on",
+                "kaspi_phone": "8 777 123 45 67", "kaspi_name": ""}
+        with mock.patch("payroll.sheets.requests.post", return_value=sheet_response()) as post:
+            response = self.client.post(reverse("admin:staff_employee_add"), form)
+            self.assertContains(response, "какое имя Kaspi показывает")  # имя получателя обязательно
+            post.assert_not_called()
+            response = self.client.post(reverse("admin:staff_employee_add"), {**form, "kaspi_name": "Ержан  Б."})
+        self.assertEqual(response.status_code, 302, response.content[:2000])
+        e = Employee.objects.get()
+        self.assertEqual((e.kaspi_phone, e.kaspi_name), ("+7 777 123 45 67", "Ержан Б."))
+        row = post.call_args.kwargs["json"]["staff"][0]
+        self.assertEqual(row[5:], ["+7 777 123 45 67", "Ержан Б."])
+        page = self.client.get(reverse("admin:staff_employee_changelist") + "?kaspi=no")
+        self.assertNotContains(page, "Ержан Б.")
+        page = self.client.get(reverse("admin:staff_employee_changelist") + "?kaspi=yes")
+        self.assertContains(page, "+7 777 123 45 67 · Ержан Б.")

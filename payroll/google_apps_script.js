@@ -3,7 +3,7 @@
  * ОТ Донер — зарплатная таблица.
  *
  * Этот скрипт живёт внутри Google Таблицы. Он:
- *  1) строит листы «Итоги», «Ставки», «Журнал», «Как пользоваться» с формулами (функция setup);
+ *  1) строит листы «Итоги», «Выплата», «Ставки», «Журнал», «Как пользоваться» с формулами (функция setup);
  *  2) принимает данные из приложения (функция doPost): строки — на лист «Журнал»,
  *     список сотрудников — на лист «Ставки».
  *
@@ -15,10 +15,13 @@
  * или удалённый аванс — строка удаляется.
  *
  * «Ставки» — у каждого сотрудника своя ставка за дневную, ночную и полную смену. Шеф вписывает их
- * в жёлтые клетки. Цену часа, деньги за часы, начислено, к выплате и итоги считают формулы.
+ * в жёлтые клетки. Там же Kaspi Gold сотрудника (номер и имя получателя) — их ведёт приложение.
+ * Цену часа, деньги за часы, начислено, к выплате и итоги считают формулы.
+ * «Выплата» — готовый список для бухгалтера: кому, сколько и на какой Kaspi Gold.
  *
  * Если скрипт обновили (новая раскладка), выполните rebuild: листы перестроятся, а приложение
  * отправит все данные заново. Заполненные личные ставки сохраняются.
+ * Если добавился только новый лист (как «Выплата»), достаточно выполнить setup — данные не трогаются.
  *
  * Подключение (один раз):
  *  1. Таблица → Расширения → Apps Script → вставить этот код целиком.
@@ -36,6 +39,7 @@ const OLD_DATA = ["Смены"]; // старые названия листа с 
 const RATES = "Ставки";
 const OLD_RATES = "Ставки по должностям (старые)";
 const TOTALS = "Итоги";
+const PAYOUT = "Выплата";
 const HELP = "Как пользоваться";
 
 // Колонки, которые присылает приложение (A–Z). Порядок совпадает с payroll/sheets.py.
@@ -47,8 +51,12 @@ const HEADERS = [
 ];
 // Что считают формулы (AA–AH): ставка, цена часа, за часы, начислено, к выплате, смен, опозданий, невыходов
 
-// Лист «Ставки»: A код (скрыт) · B сотрудник · C родной филиал · D должность · E день · F ночь · G полная · H статус
-const RATE_HEADERS = ["Код", "Сотрудник", "Родной филиал", "Должность", "День, ₸", "Ночь, ₸", "Полная смена, ₸", "Статус"];
+// Лист «Ставки»: A код (скрыт) · B сотрудник · C родной филиал · D должность · E день · F ночь · G полная ·
+// H статус · I Kaspi Gold · J имя в Kaspi
+const RATE_HEADERS = [
+  "Код", "Сотрудник", "Родной филиал", "Должность", "День, ₸", "Ночь, ₸", "Полная смена, ₸", "Статус",
+  "Kaspi Gold", "Имя в Kaspi",
+];
 
 // Филиалы — для итогов по филиалам
 const BRANCHES = ["27 мкрн", "16 мкрн", "17 мкрн", "14 мкрн"];
@@ -145,8 +153,8 @@ function toSerialDate(value) {
 }
 
 /**
- * Список сотрудников на листе «Ставки». staff — строки [код, имя, родной филиал, должность, статус].
- * overwrite: обновлять ли имя, филиал, должность и статус у тех, кто уже есть. Ставки (E–G) не трогаются никогда.
+ * Список сотрудников на листе «Ставки». staff — строки [код, имя, родной филиал, должность, статус, Kaspi, имя в Kaspi].
+ * overwrite: обновлять ли имя, филиал, должность, статус и Kaspi у тех, кто уже есть. Ставки (E–G) не трогаются никогда.
  * Возвращает, сколько людей добавлено.
  */
 function updateStaff(book, staff, overwrite) {
@@ -156,7 +164,7 @@ function updateStaff(book, staff, overwrite) {
   const n = Math.max(last - 1, 0);
   const codes = n ? sheet.getRange(2, 1, n, 1).getValues().map((r) => String(r[0])) : [];
   const info = n ? sheet.getRange(2, 2, n, 3).getValues() : [];
-  const status = n ? sheet.getRange(2, 8, n, 1).getValues() : [];
+  const extra = n ? sheet.getRange(2, 8, n, 3).getValues() : []; // статус, Kaspi, имя в Kaspi
   const fresh = [];
   let changed = false;
   staff.forEach((s) => {
@@ -164,16 +172,16 @@ function updateStaff(book, staff, overwrite) {
     const i = codes.indexOf(code);
     if (i < 0) {
       codes.push(code);
-      fresh.push([code, s[1], s[2], s[3], "", "", "", s[4] || "работает"]);
+      fresh.push([code, s[1], s[2], s[3], "", "", "", s[4] || "работает", s[5] || "", s[6] || ""]);
     } else if (overwrite) {
       info[i] = [s[1], s[2], s[3]];
-      status[i] = [s[4] || ""];
+      extra[i] = [s[4] || "", s[5] || "", s[6] || ""];
       changed = true;
     }
   });
   if (changed) {
     sheet.getRange(2, 2, n, 3).setValues(info);
-    sheet.getRange(2, 8, n, 1).setValues(status);
+    sheet.getRange(2, 8, n, 3).setValues(extra);
   }
   if (fresh.length) {
     sheet.getRange(last + 1, 1, fresh.length, RATE_HEADERS.length).setValues(fresh);
@@ -219,7 +227,7 @@ function F(formula) {
 function rebuild() {
   const book = SpreadsheetApp.getActiveSpreadsheet();
   book.insertSheet("временный"); // в таблице всегда должен оставаться хотя бы один лист
-  [TOTALS, DATA, HELP].concat(OLD_DATA).forEach((name) => {
+  [TOTALS, PAYOUT, DATA, HELP].concat(OLD_DATA).forEach((name) => {
     const s = book.getSheetByName(name);
     if (s) book.deleteSheet(s);
   });
@@ -248,12 +256,13 @@ function setup() {
   buildRates(book);
   buildData(book);
   buildTotals(book);
+  buildPayout(book);
   buildHelp(book);
   ["Лист1", "Sheet1", "Лист 1", "временный"].forEach((name) => {
     const s = book.getSheetByName(name);
     if (s && s.getLastRow() === 0 && book.getSheets().length > 1) book.deleteSheet(s);
   });
-  [TOTALS, RATES, DATA, HELP].forEach((name, i) => {
+  [TOTALS, PAYOUT, RATES, DATA, HELP].forEach((name, i) => {
     book.setActiveSheet(book.getSheetByName(name));
     book.moveActiveSheet(i + 1);
   });
@@ -318,7 +327,14 @@ function buildData(book) {
 
 function buildRates(book) {
   const sheet = sheetNamed(book, RATES);
-  if (sheet.getLastRow() > 0) return; // уже есть — ставки шефа не трогаем
+  if (sheet.getLastRow() > 0) {
+    // уже есть — ставки шефа не трогаем, только дописываем новые колонки (Kaspi)
+    sheet.getRange(1, 1, 1, RATE_HEADERS.length).setValues([RATE_HEADERS]);
+    styleHeader(sheet.getRange(1, 1, 1, RATE_HEADERS.length));
+    sheet.setColumnWidth(9, 140);
+    sheet.setColumnWidth(10, 140);
+    return;
+  }
   sheet.getRange(1, 1, 1, RATE_HEADERS.length).setValues([RATE_HEADERS]);
   styleHeader(sheet.getRange(1, 1, 1, RATE_HEADERS.length));
   sheet.setFrozenRows(1);
@@ -329,6 +345,9 @@ function buildRates(book) {
   sheet.setColumnWidth(4, 160);
   sheet.setColumnWidths(5, 3, 115);
   sheet.setColumnWidth(8, 90);
+  sheet.setColumnWidth(9, 140);
+  sheet.setColumnWidth(10, 140);
+  sheet.getRange("I1").setNote("Kaspi Gold и имя получателя вписываются в приложении: панель → «Сотрудники» → карточка.");
   sheet.getRange("B1").setNote("Список ведёт приложение: новый сотрудник появляется здесь сам. " +
     "Имя, филиал и должность меняйте в приложении (панель «Сотрудники»).");
   sheet.getRange("E1").setNote("Сколько платим этому человеку за одну дневную смену.");
@@ -388,6 +407,53 @@ function buildTotals(book) {
   sheet.setColumnWidths(5, 10, 100);
 }
 
+/**
+ * «Выплата» — список для бухгалтера за период, выбранный на «Итогах»: кому, сколько и на какой Kaspi Gold.
+ * A код (скрыт) · B сотрудник · C родной филиал · D начислено · E авансы · F к выплате · G Kaspi Gold ·
+ * H имя в Kaspi · I проверить
+ */
+function buildPayout(book) {
+  const sheet = sheetNamed(book, PAYOUT);
+  if (sheet.getLastRow() > 0) return;
+  const T = "'" + TOTALS + "'";
+  sheet.getRange("A1").setValue("Выплата зарплаты").setFontWeight("bold").setFontSize(14);
+  sheet.getRange("B2").setFormula(F('="Период: "&TEXT(' + T + '!B3,"dd.mm.yyyy")&" – "&TEXT(' + T + '!B4,"dd.mm.yyyy")'))
+    .setFontWeight("bold");
+  sheet.getRange("C2").setValue("Период меняется на листе «Итоги».").setFontColor("#7a6f66");
+  sheet.getRange("B3").setValue("Итого к выплате:").setFontWeight("bold");
+  sheet.getRange("C3").setFormula(F('=SUMIF(F6:F,">0")')).setNumberFormat(MONEY + ' "₸"').setFontWeight("bold");
+  sheet.getRange("D3").setFormula(F('=COUNTIF(I6:I,"?*")&" — проверить"')).setFontColor("#b42318");
+
+  const q = "select Z, F, G, sum(AD), sum(T), sum(AE) " +
+    "where A is not null and B >= date '\"&TEXT(" + T + "!$B$3,\"yyyy-mm-dd\")&\"' and B <= date '\"&TEXT(" + T + "!$B$4,\"yyyy-mm-dd\")&\"' " +
+    "group by Z, F, G order by G, F " +
+    "label Z 'Код', F 'Сотрудник', G 'Родной филиал', sum(AD) 'Начислено, ₸', sum(T) 'Авансы, ₸', sum(AE) 'К выплате, ₸'";
+  sheet.getRange("A5").setFormula(F(
+    "=IFERROR(QUERY('" + DATA + "'!A:AH,\"" + q + "\",1),\"\")"
+  ));
+  sheet.getRange("B4").setFormula(F('=IF(COUNTA(A6:A)=0,"За этот период отметок пока нет","")')).setFontColor("#7a6f66");
+  const look = (col) => "IFERROR(VLOOKUP(A6:A,'" + RATES + "'!A:J," + col + ",0),\"\")";
+  sheet.getRange("G5").setFormula(F('={"Kaspi Gold";ARRAYFORMULA(IF(A6:A="",,' + look(9) + '))}'));
+  sheet.getRange("H5").setFormula(F('={"Имя в Kaspi";ARRAYFORMULA(IF(A6:A="",,' + look(10) + '))}'));
+  sheet.getRange("I5").setFormula(F('={"Проверить";ARRAYFORMULA(IF(A6:A="",,' +
+    'IF(G6:G="","нет Kaspi Gold",IF(F6:F<0,"к выплате минус",""))))}'));
+
+  styleHeader(sheet.getRange("A5:I5"));
+  sheet.setRowHeight(5, 36);
+  sheet.setFrozenRows(5);
+  sheet.hideColumns(1);
+  sheet.getRange("D6:F").setNumberFormat(MONEY);
+  sheet.getRange("F6:F").setFontWeight("bold");
+  sheet.getRange("I6:I").setFontColor("#b42318");
+  sheet.setColumnWidth(2, 180);
+  sheet.setColumnWidth(3, 120);
+  sheet.setColumnWidths(4, 3, 110);
+  sheet.setColumnWidth(7, 150);
+  sheet.setColumnWidth(8, 150);
+  sheet.setColumnWidth(9, 150);
+  sheet.protect().setDescription("Считается само из «Журнала» и «Ставок»").setWarningOnly(true);
+}
+
 function buildHelp(book) {
   const sheet = sheetNamed(book, HELP);
   if (sheet.getLastRow() > 0) return;
@@ -397,7 +463,11 @@ function buildHelp(book) {
     ["«Итоги» — сколько платить каждому за период. Вверху выберите месяц и период: 1–15, 16–конец месяца или весь месяц."],
     ["   По каждому человеку: смены (включая замены на других филиалах), опоздания, невыходы, переработка и недоработка,"],
     ["   ставки, деньги за часы, бонусы, штрафы, авансы и итог к выплате."],
+    ["«Выплата» — готовый список для бухгалтера за тот же период: к выплате, Kaspi Gold и имя получателя."],
+    ["   Колонка «Проверить» подсказывает, у кого нет Kaspi Gold или сумма к выплате ушла в минус."],
+    ["   Бухгалтеру можно дать доступ к таблице или скачать лист: Файл → Скачать → PDF или Excel."],
     ["«Ставки» — у каждого сотрудника своя ставка за дневную, ночную и полную смену. Заполните жёлтые клетки."],
+    ["   Kaspi Gold и имя в Kaspi вписываются в приложении: панель → «Сотрудники» → карточка сотрудника."],
     ["   Список сотрудников ведёт приложение: новый человек появляется здесь сам. Полная смена пустая = день + ночь."],
     ["«Журнал» — каждую строку заполняет приложение. Руками здесь ничего менять не нужно:"],
     ["   изменения делаются в приложении (шеф — в панели «Зарплата»)."],
