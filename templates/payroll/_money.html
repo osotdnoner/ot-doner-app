@@ -1,8 +1,9 @@
 {% load money %}
 {% comment %}
-  Деньги и часы по человеку за смену: штрафы, бонусы, переработка, недоработка, авансы и кнопки «+».
-  Нужны: shift, employee, a (может быть пустым), hour_choices.
+  Деньги и часы человека за смену: что уже записано (с «удалить») и кнопки «+ Бонус», «+ Штраф», «Ещё».
+  Нужны: shift, employee, a (отметка на этой смене), hour_choices, positions, can_be_full, full_end, own_employees.
 {% endcomment %}
+<div class="money-list">
 {% if a.fine %}<div class="money money-fine">Штраф {{ a.fine|money }}{% if a.status == "late" %} за опоздание{% elif a.status == "absent" %} за невыход{% endif %}</div>{% endif %}
 {% for p in a.penalties.all %}
   <form method="post" action="{% url 'penalty_delete' shift.id p.id %}" class="money money-fine money-line">
@@ -32,83 +33,119 @@
     <button type="submit" class="link" onclick="return confirm('Удалить аванс?')">удалить</button>
   </form>
 {% endfor %}
+</div>
 
+{% if a.status == "on_time" or a.status == "late" %}
 <div class="money-actions">
-  {% if a.status == "late" %}
-  <details class="bonus">
-    <summary>+ Кто задержался за него</summary>
-    {% if a.cover_candidates %}
-    <form method="post" action="{% url 'attendance_cover' shift.id employee.id %}">
-      {% csrf_token %}
-      <label class="field-label" for="helper-{{ employee.id }}">Кто задержался</label>
-      <select id="helper-{{ employee.id }}" name="helper" class="select-big" required>
-        <option value="">— выберите —</option>
-        {% for c in a.cover_candidates %}<option value="{{ c.id }}">{{ c.employee.full_name }} · {{ c.position_display|lower }}{% if c.shift_id != shift.id %} · {{ c.shift.get_kind_display|lower }} смена{% endif %}</option>{% endfor %}
-      </select>
-      {% include "payroll/_hours_pick.html" with pick="cover" %}
-      <button type="submit" class="btn btn-primary">Поставить часы</button>
-      <p class="hint">Тому, кто задержался, — переработка, опоздавшему — недоработка на столько же часов.</p>
-    </form>
-    {% else %}
-    <p class="hint">Перед этой сменой на филиале никто не отмечен. Поставьте переработку и недоработку по отдельности.</p>
-    {% endif %}
-  </details>
-  {% endif %}
-  {% if a.status == "on_time" or a.status == "late" %}
-  <details class="bonus">
-    <summary>+ Штраф</summary>
-    <form method="post" action="{% url 'attendance_penalty' shift.id employee.id %}">
-      {% csrf_token %}
-      <label class="field-label" for="pamount-{{ employee.id }}">Сумма, ₸</label>
-      <input type="number" id="pamount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="2000" required>
-      <label class="field-label" for="preason-{{ employee.id }}">За что</label>
-      <input type="text" id="preason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: телефон на кассе, грубость гостю" required>
-      <button type="submit" class="btn btn-primary">Поставить штраф</button>
-    </form>
-  </details>
   <details class="bonus">
     <summary>+ Бонус</summary>
     <form method="post" action="{% url 'attendance_bonus' shift.id employee.id %}">
       {% csrf_token %}
       <label class="field-label" for="amount-{{ employee.id }}">Сумма, ₸</label>
       <input type="number" id="amount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="2000" required>
-      <label class="field-label" for="breason-{{ employee.id }}">За что</label>
-      <input type="text" id="breason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: вышел на замену, отличная работа в пик" required>
+      <label class="field-label" for="breason-{{ employee.id }}">Причина</label>
+      <input type="text" id="breason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: отличная работа в пик" required>
       <button type="submit" class="btn btn-primary">Добавить бонус</button>
     </form>
   </details>
   <details class="bonus">
-    <summary>+ Переработка</summary>
-    <form method="post" action="{% url 'attendance_hours' shift.id employee.id %}">
+    <summary>+ Штраф</summary>
+    <form method="post" action="{% url 'attendance_penalty' shift.id employee.id %}">
       {% csrf_token %}
-      <input type="hidden" name="kind" value="over">
-      {% include "payroll/_hours_pick.html" with pick="over" %}
-      <label class="field-label" for="oreason-{{ employee.id }}">Почему</label>
-      <input type="text" id="oreason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: остался до 19:00, сменщик опоздал">
-      <button type="submit" class="btn btn-primary">Поставить переработку</button>
+      <label class="field-label" for="pamount-{{ employee.id }}">Сумма, ₸</label>
+      <input type="number" id="pamount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="2000" required>
+      <label class="field-label" for="preason-{{ employee.id }}">Причина</label>
+      <input type="text" id="preason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: телефон на кассе" required>
+      <button type="submit" class="btn btn-primary">Поставить штраф</button>
     </form>
   </details>
-  <details class="bonus">
-    <summary>+ Недоработка</summary>
-    <form method="post" action="{% url 'attendance_hours' shift.id employee.id %}">
-      {% csrf_token %}
-      <input type="hidden" name="kind" value="under">
-      {% include "payroll/_hours_pick.html" with pick="under" %}
-      <label class="field-label" for="ureason-{{ employee.id }}">Почему</label>
-      <input type="text" id="ureason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: ушёл на час раньше">
-      <button type="submit" class="btn btn-primary">Поставить недоработку</button>
-    </form>
-  </details>
-  {% endif %}
-  <details class="bonus">
-    <summary>+ Аванс</summary>
-    <form method="post" action="{% url 'attendance_advance' shift.id employee.id %}">
-      {% csrf_token %}
-      <label class="field-label" for="aamount-{{ employee.id }}">Сумма, ₸</label>
-      <input type="number" id="aamount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="10000" required>
-      <label class="field-label" for="acomment-{{ employee.id }}">Комментарий</label>
-      <input type="text" id="acomment-{{ employee.id }}" name="comment" maxlength="200" placeholder="Например: из кассы, наличными">
-      <button type="submit" class="btn btn-primary">Записать аванс</button>
-    </form>
+  <details class="bonus more">
+    <summary>Ещё</summary>
+    <div class="more-box">
+      <form method="post" action="{% url 'attendance_mark' shift.id employee.id %}" class="sub-form">
+        {% csrf_token %}
+        <input type="hidden" name="status" value="{{ a.status }}">
+        <input type="hidden" name="arrived" value="{% if a.arrived_at %}{{ a.arrived_at|time:'H:i' }}{% endif %}">
+        <input type="hidden" name="reason" value="{{ a.reason }}">
+        <div class="sub-title">Смена и должность</div>
+        {% if can_be_full %}
+        <div class="segmented kind">
+          <label><input type="radio" name="full" value="0" {% if a.kind != "full" %}checked{% endif %}><span>День до {{ shift.point.day_shift_end|time:"H:i" }}</span></label>
+          <label><input type="radio" name="full" value="1" {% if a.kind == "full" %}checked{% endif %}><span>Полная до {{ full_end|time:"H:i" }}</span></label>
+        </div>
+        {% endif %}
+        <label class="pos-line">
+          <span>Кем работает сегодня</span>
+          <select name="position" class="pos-select">
+            {% for value, label in positions %}<option value="{{ value }}" {% if a.position_code == value %}selected{% endif %}>{{ label }}{% if value == employee.position %} (обычно){% endif %}</option>{% endfor %}
+          </select>
+        </label>
+        {% if employee.point_id != shift.point_id and own_employees %}
+        <label class="pos-line">
+          <span>Вместо кого</span>
+          <select name="instead_of" class="pos-select">
+            <option value="">— ни вместо кого —</option>
+            {% for o in own_employees %}{% if o.id != employee.id %}<option value="{{ o.id }}" {% if a.substitute_for_id == o.id %}selected{% endif %}>{{ o.full_name }}</option>{% endif %}{% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <button type="submit" class="btn btn-ghost">Сохранить</button>
+      </form>
+
+      {% if a.status == "late" %}
+      <details class="bonus">
+        <summary>+ Кто задержался за него</summary>
+        {% if a.cover_candidates %}
+        <form method="post" action="{% url 'attendance_cover' shift.id employee.id %}">
+          {% csrf_token %}
+          <label class="field-label" for="helper-{{ employee.id }}">Кто задержался</label>
+          <select id="helper-{{ employee.id }}" name="helper" class="select-big" required>
+            <option value="">— выберите —</option>
+            {% for c in a.cover_candidates %}<option value="{{ c.id }}">{{ c.employee.full_name }} · {{ c.position_display|lower }}{% if c.shift_id != shift.id %} · {{ c.shift.get_kind_display|lower }} смена{% endif %}</option>{% endfor %}
+          </select>
+          {% include "payroll/_hours_pick.html" with pick="cover" %}
+          <button type="submit" class="btn btn-primary">Поставить часы</button>
+          <p class="hint">Тому, кто задержался, — переработка, опоздавшему — недоработка на столько же часов.</p>
+        </form>
+        {% else %}
+        <p class="hint">Перед этой сменой на филиале никто не отмечен. Поставьте переработку и недоработку по отдельности.</p>
+        {% endif %}
+      </details>
+      {% endif %}
+      <details class="bonus">
+        <summary>+ Переработка</summary>
+        <form method="post" action="{% url 'attendance_hours' shift.id employee.id %}">
+          {% csrf_token %}
+          <input type="hidden" name="kind" value="over">
+          {% include "payroll/_hours_pick.html" with pick="over" %}
+          <label class="field-label" for="oreason-{{ employee.id }}">Почему</label>
+          <input type="text" id="oreason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: остался до 19:00, сменщик опоздал">
+          <button type="submit" class="btn btn-primary">Поставить переработку</button>
+        </form>
+      </details>
+      <details class="bonus">
+        <summary>+ Недоработка</summary>
+        <form method="post" action="{% url 'attendance_hours' shift.id employee.id %}">
+          {% csrf_token %}
+          <input type="hidden" name="kind" value="under">
+          {% include "payroll/_hours_pick.html" with pick="under" %}
+          <label class="field-label" for="ureason-{{ employee.id }}">Почему</label>
+          <input type="text" id="ureason-{{ employee.id }}" name="reason" maxlength="200" placeholder="Например: ушёл на час раньше">
+          <button type="submit" class="btn btn-primary">Поставить недоработку</button>
+        </form>
+      </details>
+      <details class="bonus">
+        <summary>+ Аванс</summary>
+        <form method="post" action="{% url 'attendance_advance' shift.id employee.id %}">
+          {% csrf_token %}
+          <label class="field-label" for="aamount-{{ employee.id }}">Сумма, ₸</label>
+          <input type="number" id="aamount-{{ employee.id }}" name="amount" min="1" step="1" inputmode="numeric" placeholder="10000" required>
+          <label class="field-label" for="acomment-{{ employee.id }}">Комментарий</label>
+          <input type="text" id="acomment-{{ employee.id }}" name="comment" maxlength="200" placeholder="Например: из кассы, наличными">
+          <button type="submit" class="btn btn-primary">Записать аванс</button>
+        </form>
+      </details>
+    </div>
   </details>
 </div>
+{% endif %}

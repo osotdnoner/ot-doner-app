@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% load money %}
+{% block title %}Косяки · ОТ Донер{% endblock %}
+{% block content %}
+<a class="back" href="{% url 'attendance' shift.id %}">← Сотрудники на смене</a>
+<h1>Косяки</h1>
+<p class="muted">Филиал «{{ shift.point.name }}» · {{ shift.get_kind_display|lower }} смена с {{ start|time:"H:i" }}</p>
+
+<div class="card issue-card">
+  <div class="segmented three issue-kind">
+    <label><input type="radio" name="kind-pick" value="absent" {% if kind == "absent" %}checked{% endif %}><span>Не вышел</span></label>
+    <label><input type="radio" name="kind-pick" value="late" {% if kind == "late" %}checked{% endif %}><span>Опоздал</span></label>
+    <label><input type="radio" name="kind-pick" value="penalty" {% if kind == "penalty" %}checked{% endif %}><span>Штраф</span></label>
+  </div>
+
+  <form method="post" action="{% url 'issue_add' shift.id %}" class="issue-form" data-kind="absent" {% if kind != "absent" %}hidden{% endif %}>
+    {% csrf_token %}
+    <input type="hidden" name="kind" value="absent">
+    <label class="field-label" for="absent-who">Кто не вышел</label>
+    <select id="absent-who" name="employee" class="select-big" required>
+      <option value="">— выберите —</option>
+      {% for e in expected %}<option value="{{ e.id }}">{{ e.full_name }} · {{ e.get_position_display|lower }}</option>{% endfor %}
+    </select>
+    <label class="field-label" for="absent-reason">Причина</label>
+    <input type="text" id="absent-reason" name="reason" maxlength="200" required placeholder="Например: заболел, не отвечает на звонки">
+    <label class="field-label" for="absent-fine">Штраф, ₸</label>
+    <input type="number" id="absent-fine" name="fine" min="0" step="1" inputmode="numeric" value="{{ absence_fine }}">
+    <p class="hint">По правилам — {% if absence_fine %}{{ absence_fine|money }}{% else %}без штрафа{% endif %}. Можно вписать свою сумму или 0. Управляющему сразу уйдёт сообщение.</p>
+    <button type="submit" class="btn btn-primary">Записать</button>
+  </form>
+
+  <form method="post" action="{% url 'issue_add' shift.id %}" class="issue-form" data-kind="late" {% if kind != "late" %}hidden{% endif %}>
+    {% csrf_token %}
+    <input type="hidden" name="kind" value="late">
+    <label class="field-label" for="late-who">Кто опоздал</label>
+    <select id="late-who" name="employee" class="select-big" required>
+      <option value="">— выберите —</option>
+      {% for e in expected %}<option value="{{ e.id }}">{{ e.full_name }} · {{ e.get_position_display|lower }}</option>{% endfor %}
+    </select>
+    <label class="field-label" for="late-time">Во сколько пришёл</label>
+    <input type="time" id="late-time" name="arrived" value="{{ now_hm }}" required>
+    <label class="field-label" for="late-reason">Причина</label>
+    <input type="text" id="late-reason" name="reason" maxlength="200" required placeholder="Например: проспал, пробка">
+    <p class="hint">Штраф посчитается сам: {% for t in tiers %}от {{ t.minutes_from }} мин — {{ t.amount|money }}{% if not forloop.last %}, {% endif %}{% empty %}ступени не заданы{% endfor %}.</p>
+    <button type="submit" class="btn btn-primary">Записать</button>
+  </form>
+
+  <form method="post" action="{% url 'issue_add' shift.id %}" class="issue-form" data-kind="penalty" {% if kind != "penalty" %}hidden{% endif %}>
+    {% csrf_token %}
+    <input type="hidden" name="kind" value="penalty">
+    {% if on_shift %}
+    <label class="field-label" for="pen-who">Кому</label>
+    <select id="pen-who" name="employee" class="select-big" required>
+      <option value="">— выберите —</option>
+      {% for a in on_shift %}<option value="{{ a.employee.id }}">{{ a.employee.full_name }} · {{ a.position_display|lower }}</option>{% endfor %}
+    </select>
+    <label class="field-label" for="pen-amount">Сумма, ₸</label>
+    <input type="number" id="pen-amount" name="amount" min="1" step="1" inputmode="numeric" placeholder="2000" required>
+    <label class="field-label" for="pen-reason">Причина</label>
+    <input type="text" id="pen-reason" name="reason" maxlength="200" required placeholder="Например: телефон на кассе, грубость гостю">
+    <button type="submit" class="btn btn-primary">Поставить штраф</button>
+    {% else %}
+    <p class="hint">Штраф ставится тем, кто на смене. Сначала отметьте, кто пришёл.</p>
+    {% endif %}
+  </form>
+</div>
+
+<h2 class="section-title">Записано за смену</h2>
+{% if absent or late or penalties %}
+  {% for a in absent %}
+  <form method="post" action="{% url 'attendance_remove' shift.id a.id %}" class="issue-line item-critical">
+    {% csrf_token %}<input type="hidden" name="next" value="issues">
+    <span><strong>{{ a.employee.full_name }}</strong> — не вышел: {{ a.reason }}{% if a.fine %} · штраф {{ a.fine|money }}{% endif %}</span>
+    <button type="submit" class="link" onclick="return confirm('Удалить запись «не вышел»?')">удалить</button>
+  </form>
+  {% endfor %}
+  {% for a in late %}
+  <form method="post" action="{% url 'late_clear' shift.id a.id %}" class="issue-line item-deviation">
+    {% csrf_token %}
+    <span><strong>{{ a.employee.full_name }}</strong> — опоздал на {{ a.late_human }} (пришёл в {{ a.arrived_at|time:"H:i" }}): {{ a.reason }}{% if a.fine %} · штраф {{ a.fine|money }}{% endif %}</span>
+    <button type="submit" class="link" onclick="return confirm('Убрать опоздание? Сотрудник останется на смене как пришедший вовремя.')">удалить</button>
+  </form>
+  {% endfor %}
+  {% for p in penalties %}
+  <form method="post" action="{% url 'penalty_delete' shift.id p.id %}" class="issue-line is-penalty">
+    {% csrf_token %}<input type="hidden" name="next" value="issues">
+    <span><strong>{{ p.attendance.employee.full_name }}</strong> — штраф {{ p.amount|money }}: {{ p.reason }}</span>
+    <button type="submit" class="link" onclick="return confirm('Удалить штраф?')">удалить</button>
+  </form>
+  {% endfor %}
+{% else %}
+  <p class="hint">Пока ничего. Хорошая смена!</p>
+{% endif %}
+
+<a class="btn btn-ghost" href="{% url 'attendance' shift.id %}">← Вернуться к сотрудникам</a>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.querySelectorAll("[name=kind-pick]").forEach((radio) => {
+    radio.addEventListener("change", () => {
+      document.querySelectorAll(".issue-form").forEach((f) => { f.hidden = f.dataset.kind !== radio.value; });
+    });
+  });
+</script>
+{% endblock %}

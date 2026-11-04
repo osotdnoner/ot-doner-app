@@ -6,114 +6,80 @@
 <h1>Сотрудники на смене</h1>
 <p class="muted">Филиал «{{ shift.point.name }}» · {{ shift.get_kind_display|lower }} смена с {{ start|time:"H:i" }} · на смене: <strong>{{ count }}</strong></p>
 
-<details class="rules">
-  <summary>Как отмечать и что считается</summary>
-  <ul>
-    <li>Отмечайте только тех, кто пришёл (или кого ждали, а он не вышел). Остальных трогать не нужно.</li>
-    <li>В списке точки — её сотрудники и те, кто выходил сюда за последний месяц. Кого нет в списке — найдите поиском: он ищет по всем точкам и резерву.</li>
-    <li>Новый человек на первой смене — «+ Новый сотрудник» внизу. Уволился — «Больше не работает». Управляющему придёт сообщение.</li>
-    <li>«Кем работает сегодня» — если человек вышел не на свою обычную должность. Выберите до отметки.</li>
-    {% for t in tiers %}<li>Опоздание от {{ t.minutes_from }} мин — {{ t.amount|money }}</li>{% empty %}<li>Штрафы за опоздание не заданы</li>{% endfor %}
-    <li>Не вышел — {% if absence_fine %}{{ absence_fine|money }}{% else %}без автоматического штрафа, решает шеф{% endif %}</li>
-    {% if can_be_full %}<li>«Полная» — сотрудник остаётся до конца ночной смены ({{ full_end|time:"H:i" }}). Ночной администратор увидит его уже отмеченным.</li>{% endif %}
-    <li>Бонус, штраф, переработку, недоработку и аванс ставите вы.{% if sheet_on %} Всё сразу уходит в зарплатную таблицу.{% endif %}</li>
-  </ul>
-</details>
-
 <div class="search-box">
-  <input type="search" id="staff-search" placeholder="Найти сотрудника: начните вводить имя" autocomplete="off">
+  <input type="search" id="staff-search" placeholder="🔍 Найти сотрудника" autocomplete="off">
   <p class="hint search-empty" hidden>Никого не нашли. Если это новый человек — <a href="#new-employee" data-open="new-employee">добавьте его</a>.</p>
 </div>
 
-{% if on_shift or from_day %}
-<section class="staff-section">
-<h2 class="section-title">На смене</h2>
-{% for f in from_day %}
-  <article class="item item-ok" id="emp-{{ f.employee.id }}" data-name="{{ f.employee.full_name|lower }}">
-    <div class="item-head">
-      <div>
-        <div class="item-title">{{ f.employee.full_name }}</div>
-        <div class="item-hint">{{ f.position_display }}</div>
-      </div>
-      <span class="pill pill-ok">Полная смена</span>
-    </div>
-    <div class="item-summary muted">С дневной смены, отметил {{ f.shift.admin }}.</div>
-  </article>
-{% endfor %}
-{% for a in on_shift %}{% with employee=a.employee %}
-  <article class="item {% if a.status == 'on_time' %}item-ok{% elif a.status == 'late' %}item-deviation{% else %}item-critical{% endif %}" id="emp-{{ employee.id }}" data-name="{{ employee.full_name|lower }}">
-    <div class="item-head">
-      <div>
-        <div class="item-title">{{ employee.full_name }}</div>
-        <div class="item-hint">{% if a.position %}Сегодня: <strong>{{ a.position_display }}</strong> · обычно {{ employee.get_position_display|lower }}{% else %}{{ employee.get_position_display }}{% endif %}{% if employee.point_id != shift.point_id %} · {% if employee.point %}с {{ employee.point }}{% else %}резерв{% endif %}{% endif %}</div>
-      </div>
-      {% if a.status == "on_time" %}<span class="pill pill-ok">Пришёл{% if a.kind == "full" %} · полная{% endif %}</span>
-      {% elif a.status == "late" %}<span class="pill pill-deviation">Опоздал на {{ a.late_human }}{% if a.kind == "full" %} · полная{% endif %}</span>
-      {% else %}<span class="pill pill-critical">Не вышел</span>{% endif %}
-    </div>
-    {% if a.substitute_for %}<div class="item-summary muted">Вместо {{ a.substitute_for }}</div>{% endif %}
-    {% if employee.replaced_by_sub %}<div class="item-summary muted">Заменяет: {{ employee.replaced_by_sub }}</div>{% endif %}
-    {% if a.status == "late" %}<div class="item-summary">Пришёл в {{ a.arrived_at|time:"H:i" }} · {{ a.reason }}</div>{% endif %}
-    {% if a.status == "absent" %}<div class="item-summary">Причина: {{ a.reason }}</div>{% endif %}
-    <button type="button" class="link edit" data-edit="mark-{{ employee.id }}">Изменить</button>
-    {% include "payroll/_mark_form.html" with hidden=True ask_instead=True %}
-    {% include "payroll/_money.html" %}
-    <form method="post" action="{% url 'attendance_remove' shift.id a.id %}" class="remove-line">
-      {% csrf_token %}
-      <button type="submit" class="link muted-link" onclick="return confirm('Убрать {{ employee.full_name|escapejs }} со смены? Строка удалится и из таблицы.')">Убрать со смены (отметили по ошибке)</button>
-    </form>
-  </article>
-{% endwith %}{% endfor %}
-</section>
-{% endif %}
+<p class="hint">Откройте должность и нажмите на тех, кто пришёл. Кто не вышел или опоздал — в «Косяки» внизу.</p>
 
-<section class="staff-section">
-<h2 class="section-title">{% if on_shift %}Ещё не отмечены{% else %}Отметьте, кто пришёл{% endif %}</h2>
-{% for employee in regulars %}
-  <article class="item" id="emp-{{ employee.id }}" data-name="{{ employee.full_name|lower }}">
-    <div class="item-head">
-      <div>
-        <div class="item-title">{{ employee.full_name }}</div>
-        <div class="item-hint">{{ employee.get_position_display }}{% if employee.point_id != shift.point_id %} · {% if employee.point %}с {{ employee.point }}{% else %}резерв{% endif %}, выходил сюда недавно{% endif %}</div>
+{% for c in categories %}
+<details class="category" data-cat="{{ c.code }}">
+  <summary><span>{{ c.title }}</span><span class="cat-count{% if c.on_count %} has{% endif %}">{{ c.on_count }} из {{ c.people|length }}</span></summary>
+  {% for p in c.people %}{% with employee=p.employee a=p.a %}
+  <div class="person{% if p.is_on %} is-on{% elif a.status == 'absent' %} is-absent{% endif %}" id="emp-{{ employee.id }}" data-name="{{ employee.full_name|lower }}">
+    {% if p.from_day %}
+      <div class="person-head">
+        <span class="person-toggle on static"><span class="tick"></span><span class="person-name">{{ employee.full_name }}<small>{{ p.from_day.position_display }} · полная смена, отметил {{ p.from_day.shift.admin }}</small></span></span>
       </div>
-      <span class="pill pill-todo">Отметить</span>
-    </div>
-    {% if employee.replaced_by_sub %}<div class="item-summary muted">Заменяет: {{ employee.replaced_by_sub }}</div>{% endif %}
-    {% include "payroll/_mark_form.html" with a=None hidden=False ask_instead=False %}
-    {% if employee.point_id == shift.point_id %}
-      {% include "payroll/_money.html" with a=None %}
-      <form method="post" action="{% url 'employee_left' shift.id employee.id %}" class="remove-line">
+    {% elif p.is_on %}
+      <form method="post" action="{% url 'attendance_remove' shift.id a.id %}" class="person-head">
         {% csrf_token %}
-        <button type="submit" class="link muted-link" onclick="return confirm('{{ employee.full_name|escapejs }} больше не работает? Он пропадёт из списков, история и зарплата останутся. Управляющему придёт сообщение.')">Больше не работает</button>
+        <button type="submit" class="person-toggle on" onclick="return confirm('Убрать {{ employee.full_name|escapejs }} со смены?')">
+          <span class="tick"></span>
+          <span class="person-name">{{ employee.full_name }}{% if p.hint %}<small>{{ p.hint }}</small>{% endif %}</span>
+        </button>
+        {% if a.status == "late" %}<span class="pill pill-deviation">опоздал {{ a.late_human }}</span>{% endif %}
       </form>
+      {% if employee.replaced_by_sub %}<div class="item-summary muted">Заменяет: {{ employee.replaced_by_sub }}</div>{% endif %}
+      {% include "payroll/_money.html" %}
+    {% else %}
+      <form method="post" action="{% url 'attendance_mark' shift.id employee.id %}" class="person-head">
+        {% csrf_token %}
+        <input type="hidden" name="status" value="on_time">
+        <input type="hidden" name="position" value="{{ employee.position }}">
+        <button type="submit" class="person-toggle">
+          <span class="tick"></span>
+          <span class="person-name">{{ employee.full_name }}{% if p.hint %}<small>{{ p.hint }}</small>{% endif %}</span>
+        </button>
+        {% if a.status == "absent" %}<span class="pill pill-critical">не вышел</span>{% endif %}
+      </form>
+      {% if employee.replaced_by_sub %}<div class="item-summary muted">Заменяет: {{ employee.replaced_by_sub }}</div>{% endif %}
     {% endif %}
-  </article>
+  </div>
+  {% endwith %}{% endfor %}
+</details>
 {% empty %}
-  {% if not on_shift %}<p class="hint">В списке точки пока никого. Найдите сотрудника поиском или добавьте нового.</p>{% endif %}
+  <p class="hint">В списке точки пока никого. Найдите сотрудника поиском или добавьте нового.</p>
 {% endfor %}
-</section>
 
-<div id="others" hidden>
-  <h2 class="section-title">Другие точки и резерв</h2>
+<details class="category" id="others" data-cat="others" hidden>
+  <summary><span>Другие точки и резерв</span></summary>
   {% for employee in others %}
-  <article class="item other" id="emp-{{ employee.id }}" data-name="{{ employee.full_name|lower }}" hidden>
-    <div class="item-head">
-      <div>
-        <div class="item-title">{{ employee.full_name }}</div>
-        <div class="item-hint">{{ employee.get_position_display }} · {% if employee.point %}{{ employee.point }}{% else %}резерв{% endif %}</div>
-      </div>
-      <span class="pill pill-todo">Отметить</span>
-    </div>
-    {% include "payroll/_mark_form.html" with a=None hidden=False ask_instead=True %}
-  </article>
+  <div class="person other" id="emp-{{ employee.id }}" data-name="{{ employee.full_name|lower }}" hidden>
+    <form method="post" action="{% url 'attendance_mark' shift.id employee.id %}" class="person-head">
+      {% csrf_token %}
+      <input type="hidden" name="status" value="on_time">
+      <input type="hidden" name="position" value="{{ employee.position }}">
+      <button type="submit" class="person-toggle">
+        <span class="tick"></span>
+        <span class="person-name">{{ employee.full_name }}<small>{{ employee.get_position_display|lower }} · {% if employee.point %}{{ employee.point }}{% else %}резерв{% endif %}</small></span>
+      </button>
+    </form>
+  </div>
   {% endfor %}
+</details>
+
+<div class="bottom-actions">
+  <a class="btn btn-issues" href="{% url 'issues' shift.id %}">⚠ Косяки{% if issues_count %} · {{ issues_count }}{% endif %}</a>
+  <p class="hint">Кто не вышел на смену, кто опоздал и штрафы с причиной.</p>
 </div>
 
 <details class="card substitute" id="new-employee">
   <summary>+ Новый сотрудник</summary>
   <form method="post" action="{% url 'employee_new' shift.id %}">
     {% csrf_token %}
-    <p class="hint">Человек пришёл на первую смену. Он сразу будет отмечен «Пришёл» на этой точке.</p>
+    <p class="hint">Человек пришёл на первую смену. Он сразу будет отмечен на этой точке.</p>
     <label class="field-label" for="new-name">Имя и фамилия</label>
     <input type="text" id="new-name" name="full_name" maxlength="120" required placeholder="Например: Айдос Серикбаев">
     <label class="field-label" for="new-position">Должность</label>
@@ -134,6 +100,22 @@
   </form>
 </details>
 
+{% if own_employees %}
+<details class="card substitute" id="left-employee">
+  <summary>Сотрудник уволился</summary>
+  <form method="post" action="{% url 'employee_left' shift.id 0 %}" onsubmit="return confirm('Отметить, что сотрудник больше не работает? Он пропадёт из списков, история и зарплата останутся. Управляющему придёт сообщение.')">
+    {% csrf_token %}
+    <label class="field-label" for="left-who">Кто больше не работает</label>
+    <select id="left-who" name="employee" class="select-big" required>
+      <option value="">— выберите —</option>
+      {% for e in own_employees %}<option value="{{ e.id }}">{{ e.full_name }} · {{ e.get_position_display|lower }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="btn btn-ghost">Больше не работает</button>
+    <p class="hint">Вернуть человека может управляющий в панели «Сотрудники».</p>
+  </form>
+</details>
+{% endif %}
+
 {% if count %}
   <a class="btn btn-ghost" href="{% url 'home' %}">Дальше: приём смены</a>
 {% endif %}
@@ -141,54 +123,55 @@
 
 {% block scripts %}
 <script>
-  document.querySelectorAll(".mark-form").forEach((form) => {
-    const late = form.querySelector(".late-part");
-    const reason = form.querySelector(".reason-part");
-    const save = form.querySelector(".save-mark");
-    function update(event) {
-      const status = (form.querySelector("[name=status]:checked") || {}).value;
-      // «Пришёл» — одним нажатием. Должность поменяли у уже отмеченного «Пришёл» — тоже сохраняем сразу.
-      const quick = status === "on_time";
-      const changed = event && ["status", "position", "instead_of"].includes(event.target.name);
-      if (quick && changed) { form.submit(); return; }
-      late.hidden = status !== "late";
-      reason.hidden = !status || quick;
-      save.hidden = !status || quick;
-      reason.querySelector("textarea").required = !reason.hidden;
-      reason.querySelector("textarea").placeholder = status === "absent"
-        ? "Например: заболел, не отвечает на звонки" : "Например: проспал, пробка";
-    }
-    form.addEventListener("change", update);
-    update();
-  });
-  document.querySelectorAll("[data-edit]").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.getElementById(button.dataset.edit).hidden = false;
-      button.hidden = true;
-    });
-  });
+  // Какие категории открыты — помним до конца смены, чтобы после отметки список не сворачивался
+  const KEY = "cats-{{ shift.id }}";
+  const search = document.getElementById("staff-search");
+  const cats = [...document.querySelectorAll("details.category[data-cat]:not(#others)")];
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(KEY) || "null"); } catch (e) {}
+  cats.forEach((d, i) => { d.open = saved ? saved.includes(d.dataset.cat) : i === 0; });
+  const target = location.hash && document.querySelector(location.hash);
+  if (target && target.closest("details.category")) {
+    target.closest("details.category").open = true;
+    target.scrollIntoView({ block: "center" });
+  }
+  function remember() {
+    if (search.value.trim()) return; // во время поиска категории раскрываются сами — не запоминаем
+    try { sessionStorage.setItem(KEY, JSON.stringify(cats.filter((d) => d.open).map((d) => d.dataset.cat))); } catch (e) {}
+  }
+  cats.forEach((d) => d.addEventListener("toggle", remember));
+
   document.querySelectorAll("[data-open]").forEach((link) => {
     link.addEventListener("click", () => { document.getElementById(link.dataset.open).open = true; });
   });
-  // Поиск: фильтрует список точки и показывает совпадения с других точек и из резерва
-  const search = document.getElementById("staff-search");
+
+  // Поиск: по всем категориям и по другим точкам и резерву
   const others = document.getElementById("others");
   const empty = document.querySelector(".search-empty");
+  let before = null;
   search.addEventListener("input", () => {
     const q = search.value.trim().toLowerCase();
-    let shown = 0, otherShown = 0;
-    document.querySelectorAll("article[data-name]").forEach((card) => {
-      const match = !q || card.dataset.name.includes(q);
-      const isOther = card.classList.contains("other");
-      card.hidden = isOther ? !(q.length >= 2 && match) : !match;
-      if (!card.hidden) { shown++; if (isOther) otherShown++; }
+    if (q && before === null) before = cats.map((d) => d.open);
+    let shown = 0;
+    cats.forEach((d) => {
+      let inCat = 0;
+      d.querySelectorAll(".person").forEach((p) => {
+        p.hidden = !!q && !p.dataset.name.includes(q);
+        if (!p.hidden) inCat++;
+      });
+      d.hidden = !!q && inCat === 0;
+      if (q) d.open = inCat > 0;
+      shown += q ? inCat : 0;
+    });
+    let otherShown = 0;
+    others.querySelectorAll(".person").forEach((p) => {
+      p.hidden = !(q.length >= 2 && p.dataset.name.includes(q));
+      if (!p.hidden) otherShown++;
     });
     others.hidden = otherShown === 0;
-    empty.hidden = !q || shown > 0;
-    document.querySelectorAll(".staff-section").forEach((section) => {
-      const cards = section.querySelectorAll("article[data-name]");
-      section.hidden = q && cards.length && [...cards].every((c) => c.hidden);
-    });
+    others.open = otherShown > 0;
+    empty.hidden = !q || shown + otherShown > 0;
+    if (!q && before !== null) { cats.forEach((d, i) => { d.open = before[i]; }); before = null; }
   });
 </script>
 {% endblock %}

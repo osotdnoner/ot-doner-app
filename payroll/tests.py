@@ -256,7 +256,7 @@ class AttendancePageTests(TestCase):
         response = self.client.post(reverse("attendance_mark", args=[self.shift.id, self.cashier.id]),
                                     {"status": "late", "arrived": arrived, "reason": "Пробка"}, follow=True)
         self.assertContains(response, "штраф 3\u00a0000\u00a0₸")
-        self.assertContains(response, "Опоздал на")
+        self.assertContains(response, 'pill-deviation">опоздал 1')  # 15–16 мин: смена началась не ровно в минуту
         response = self.client.post(reverse("attendance_bonus", args=[self.shift.id, self.cashier.id]),
                                     {"amount": "1500", "reason": "Помог на кухне"}, follow=True)
         self.assertContains(response, "Бонус 1\u00a0500\u00a0₸ — Помог на кухне")
@@ -540,12 +540,13 @@ class SubstitutePenaltyAdvanceTests(TestCase):
         self.assertContains(page, "+ Новый сотрудник")
         response = self.client.post(reverse("attendance_mark", args=[live.id, self.reserve.id]),
                                     {"status": "on_time", "position": "doner", "instead_of": self.doner.id}, follow=True)
-        self.assertContains(response, "Вместо Ерлан")
+        self.assertContains(response, "вместо Ерлан")
         self.assertContains(response, "Заменяет: Даурен")
         self.assertContains(response, "на смене: <strong>1</strong>")
         response = self.client.post(reverse("attendance_penalty", args=[live.id, self.reserve.id]),
                                     {"amount": "1000", "reason": "Опоздал с перерыва"}, follow=True)
         self.assertContains(response, "Штраф 1\u00a0000\u00a0₸ — Опоздал с перерыва")
+        self.client.post(reverse("attendance_mark", args=[live.id, self.cashier.id]), {"status": "on_time"})
         response = self.client.post(reverse("attendance_advance", args=[live.id, self.cashier.id]),
                                     {"amount": "10000", "comment": "наличными"}, follow=True)
         self.assertContains(response, "Аванс 10\u00a0000\u00a0₸ — наличными")
@@ -804,13 +805,18 @@ class TodayPositionTests(TestCase):
                                     checked_in_at=now - timedelta(hours=1), selfie=fake_selfie())
         self.client.login(username="87010000001", password="test12345")
         page = self.client.get(reverse("attendance", args=[live.id]))
-        self.assertContains(page, "Кем работает сегодня")
-        self.assertContains(page, '<option value="cashier" selected>Кассир (обычно)</option>', html=True)
-        self.assertNotContains(page, '<option value="admin"')
+        self.assertContains(page, "Кассиры")  # категория по её обычной должности
+        response = self.client.post(reverse("attendance_mark", args=[live.id, self.sabina.id]),
+                                    {"status": "on_time", "position": "cashier"}, follow=True)
+        # в «Ещё» у отмеченной: «Кем работает сегодня»
+        self.assertContains(response, "Кем работает сегодня")
+        self.assertContains(response, '<option value="cashier" selected>Кассир (обычно)</option>', html=True)
+        self.assertNotContains(response, '<option value="admin"')
         response = self.client.post(reverse("attendance_mark", args=[live.id, self.sabina.id]),
                                     {"status": "on_time", "position": "runner"}, follow=True)
         self.assertContains(response, "Сабина: сегодня раннер кассы.")
-        self.assertContains(response, "Сегодня: <strong>Раннер кассы</strong> · обычно кассир")
+        self.assertContains(response, "<small>сегодня раннер кассы</small>")
+        self.assertContains(response, "Раннеры кассы")  # переехала в категорию сегодняшней должности
         self.assertContains(response, '<option value="runner" selected>Раннер кассы</option>', html=True)
 
 
@@ -900,16 +906,83 @@ class StaffBaseTests(TestCase):
                                     checked_in_at=now - timedelta(hours=1), selfie=fake_selfie())
         self.client.login(username="87010000001", password="test12345")
         page = self.client.get(reverse("attendance", args=[live.id]))
-        self.assertContains(page, "Отметьте, кто пришёл")
-        self.assertContains(page, 'class="item other"')  # Нурбек — в поиске, скрыт до ввода
+        self.assertContains(page, "нажмите на тех, кто пришёл")
+        self.assertContains(page, "Кассиры")
+        self.assertContains(page, 'class="person other"')  # Нурбек — в поиске, скрыт до ввода
+        self.assertContains(page, "Косяки")
         response = self.client.post(reverse("employee_new", args=[live.id]),
                                     {"full_name": "Даурен", "position": "runner", "phone": "", "kaspi_phone": "",
                                      "kaspi_name": ""}, follow=True)
         self.assertContains(response, "Даурен добавлен и отмечен на смене")
         self.assertContains(response, "на смене: <strong>1</strong>")
-        response = self.client.post(reverse("employee_left", args=[live.id, self.aidos.id]), follow=True)
+        response = self.client.post(reverse("employee_left", args=[live.id, 0]), {"employee": self.aidos.id},
+                                    follow=True)
         self.assertContains(response, "Айдос больше не в списке")
         dauren = Attendance.objects.get(employee__full_name="Даурен")
         response = self.client.post(reverse("attendance_remove", args=[live.id, dauren.id]), follow=True)
         self.assertContains(response, "Даурен убран со смены")
         self.assertContains(response, "на смене: <strong>0</strong>")
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", GOOGLE_SHEET_URL="")
+class IssuesPageTests(TestCase):
+    """«Косяки»: не вышел, опоздал, штраф — и удаление записей."""
+
+    def setUp(self):
+        self.point = Point.objects.create(name="27 мкрн")
+        self.admin = User.objects.create_user("87010000001", password="test12345", first_name="Ислам")
+        self.admin.points.add(self.point)
+        self.doner = Employee.objects.create(point=self.point, full_name="Ержан", position="doner")
+        self.cashier = Employee.objects.create(point=self.point, full_name="Айлин", position="cashier")
+        now = timezone.now()
+        self.shift = Shift.objects.create(point=self.point, admin=self.admin, kind=Shift.Kind.DAY,
+                                          planned_start=now - timedelta(hours=1), planned_end=now + timedelta(hours=8),
+                                          checked_in_at=now - timedelta(hours=1), selfie=fake_selfie())
+        self.client.login(username="87010000001", password="test12345")
+        self.url = reverse("issue_add", args=[self.shift.id])
+
+    def test_absent_with_custom_fine_and_delete(self):
+        page = self.client.get(reverse("issues", args=[self.shift.id]))
+        self.assertContains(page, "Кто не вышел")
+        self.assertContains(page, "Ержан · донерщик")
+        response = self.client.post(self.url, {"kind": "absent", "employee": self.doner.id, "reason": "Заболел",
+                                               "fine": "2000"}, follow=True)
+        self.assertContains(response, "Ержан: не вышел, штраф 2")
+        self.assertContains(response, "не вышел: Заболел")
+        a = Attendance.objects.get(employee=self.doner)
+        self.assertEqual((a.status, a.fine), ("absent", 2000))
+        page = self.client.get(reverse("attendance", args=[self.shift.id]))
+        self.assertContains(page, "Косяки · 1")
+        self.assertContains(page, "не вышел")
+        response = self.client.post(reverse("attendance_remove", args=[self.shift.id, a.id]), {"next": "issues"},
+                                    follow=True)
+        self.assertContains(response, "Пока ничего")
+        # «0» — без штрафа, пусто — по правилам
+        self.client.post(self.url, {"kind": "absent", "employee": self.doner.id, "reason": "x", "fine": "0"})
+        self.assertEqual(Attendance.objects.get(employee=self.doner).fine, 0)
+
+    def test_late_and_clear(self):
+        arrived = f"{timezone.localtime(self.shift.planned_start) + timedelta(minutes=20):%H:%M}"
+        self.client.post(reverse("attendance_mark", args=[self.shift.id, self.cashier.id]), {"status": "on_time"})
+        response = self.client.post(self.url, {"kind": "late", "employee": self.cashier.id, "arrived": arrived,
+                                               "reason": "Пробка"}, follow=True)
+        self.assertContains(response, "Айлин: опоздал на ")
+        self.assertContains(response, "штраф 3\u00a0000\u00a0₸")
+        a = Attendance.objects.get(employee=self.cashier)
+        self.assertEqual((a.status, a.fine), ("late", 3000))
+        self.client.post(reverse("late_clear", args=[self.shift.id, a.id]))
+        a.refresh_from_db()
+        self.assertEqual((a.status, a.fine), ("on_time", 0))
+
+    def test_penalty_only_for_those_on_shift(self):
+        response = self.client.post(self.url, {"kind": "penalty", "employee": self.doner.id, "amount": "1000",
+                                               "reason": "Телефон"})
+        self.assertEqual(response.status_code, 404)
+        self.client.post(reverse("attendance_mark", args=[self.shift.id, self.doner.id]), {"status": "on_time"})
+        response = self.client.post(self.url, {"kind": "penalty", "employee": self.doner.id, "amount": "1000",
+                                               "reason": "Телефон"}, follow=True)
+        self.assertContains(response, "Ержан</strong> — штраф 1")
+        penalty = Attendance.objects.get(employee=self.doner).penalties.get()
+        response = self.client.post(reverse("penalty_delete", args=[self.shift.id, penalty.id]), {"next": "issues"},
+                                    follow=True)
+        self.assertContains(response, "Пока ничего")

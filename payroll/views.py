@@ -1,3 +1,5 @@
+from dataclasses import dataclass, field
+
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
@@ -27,65 +29,206 @@ def _own_open_shift(request, shift_id) -> Shift:
     return shift
 
 
-def _back(shift, employee_id=None):
+def _back(shift, employee_id=None, request=None):
+    if request is not None and request.POST.get("next") == "issues":
+        return redirect(reverse("issues", args=[shift.id]))
     url = reverse("attendance", args=[shift.id])
     return redirect(f"{url}#emp-{employee_id}" if employee_id else url)
 
 
-@login_required
-def attendance_page(request, shift_id: int):
-    """
-    Экран «Сотрудники на смене»: кто уже на смене, список точки (свои и кто выходил сюда за месяц)
-    и поиск по всем сотрудникам сети. Отмечать нужно только тех, кто пришёл или не вышел.
-    """
-    shift = _own_open_shift(request, shift_id)
-    if shift.needs_late_reason:
-        return redirect("home")
-    records = {
+# Названия категорий на экране смены — должности во множественном числе
+CATEGORY_TITLES = {
+    "doner": "Донерщики", "pizza": "Пиццеристы", "cashier": "Кассиры", "runner_delivery": "Раннеры доставки",
+    "runner": "Раннеры кассы", "cleaner": "Техперсонал", "cleaner_kitchen": "Техперсонал кухни",
+    "cleaner_hall": "Техперсонал зала", "cook": "Повара горячего цеха", "operator": "Операторы", "other": "Другие",
+}
+
+
+@dataclass
+class Person:
+    employee: Employee
+    a: Attendance | None = None         # отметка на этой смене
+    from_day: Attendance | None = None  # ночная смена: человек на полной смене с дневной
+    hint: str = ""                      # подпись под именем
+
+    @property
+    def is_on(self) -> bool:
+        return self.from_day is not None or (self.a is not None and self.a.status in Attendance.WORKED)
+
+
+@dataclass
+class Category:
+    code: str
+    title: str
+    people: list = field(default_factory=list)
+
+    @property
+    def on_count(self) -> int:
+        return sum(p.is_on for p in self.people)
+
+
+def _shift_records(shift) -> dict[int, Attendance]:
+    return {
         a.employee_id: a
         for a in Attendance.objects.filter(shift=shift).exclude(status=Attendance.Status.OFF)
         .exclude(employee__position=Employee.Position.ADMIN)
         .select_related("employee__point", "substitute_for").prefetch_related("bonuses", "penalties", "extra_hours")
     }
+
+
+@login_required
+def attendance_page(request, shift_id: int):
+    """
+    Экран «Сотрудники на смене»: категории по должностям, в каждой — люди точки (свои и кто выходил сюда
+    за месяц). Нажал на имя — пришёл. У отмеченных — бонус, штраф и «Ещё». Поиск — по всем точкам.
+    Не вышел, опоздал, штраф с причиной — на странице «Косяки».
+    """
+    shift = _own_open_shift(request, shift_id)
+    if shift.needs_late_reason:
+        return redirect("home")
+    records = _shift_records(shift)
     advances = {}
     for adv in Advance.objects.filter(shift=shift).order_by("id"):
         advances.setdefault(adv.employee_id, []).append(adv)
-    for a in records.values():
-        a.employee.shift_advances = advances.get(a.employee_id, [])
-        if a.status == Attendance.Status.LATE:  # кто мог задержаться за опоздавшего
-            a.cover_candidates = list(stayed_candidates(a))
     from_day = full_from_day(shift)
     replaced = {a.substitute_for_id: a.employee for a in records.values() if a.substitute_for_id}
 
-    on_shift = sorted(records.values(), key=lambda a: (a.status == Attendance.Status.ABSENT, a.employee.full_name.lower()))
-    for a in on_shift:
-        a.employee.replaced_by_sub = replaced.get(a.employee_id)
-    regulars = [e for e in employees_for(shift) if e.id not in records and e.id not in from_day]
-    for e in regulars:
+    people = {}
+    for e in employees_for(shift):
+        people[e.id] = Person(e)
+    for employee_id, a in records.items():
+        people.setdefault(employee_id, Person(a.employee)).a = a
+        if a.status == Attendance.Status.LATE:  # кто мог задержаться за опоздавшего
+            a.cover_candidates = list(stayed_candidates(a))
+    for employee_id, a in from_day.items():
+        people.setdefault(employee_id, Person(a.employee)).from_day = a
+
+    categories = {code: Category(code, CATEGORY_TITLES.get(code, label))
+                  for code, label in Employee.Position.choices if code != Employee.Position.ADMIN}
+    for person in people.values():
+        e = person.employee
         e.shift_advances = advances.get(e.id, [])
         e.replaced_by_sub = replaced.get(e.id)
-    taken = set(records) | set(from_day) | {e.id for e in regulars}
-    others = list(others_for(shift, exclude_ids=taken))
-    rules = FineRules.current()
+        code = person.a.position_code if person.a else (person.from_day.position_code if person.from_day else e.position)
+        categories.get(code, categories["other"]).people.append(person)
+    for person in people.values():
+        e, a, parts = person.employee, person.a, []
+        if a and a.position:
+            parts.append(f"сегодня {a.position_display.lower()}")
+        if e.point_id != shift.point_id:
+            parts.append(f"с {e.point}" if e.point_id else "резерв")
+        if a and a.kind == Attendance.Kind.FULL:
+            parts.append("полная смена")
+        if a and a.substitute_for_id:
+            parts.append(f"вместо {a.substitute_for}")
+        if a and a.status == Attendance.Status.ABSENT:
+            parts.append(a.reason)
+        person.hint = " · ".join(parts)
+    for c in categories.values():
+        c.people.sort(key=lambda p: (p.employee.point_id != shift.point_id, p.employee.full_name.lower()))
+    others = list(others_for(shift, exclude_ids=people.keys()))
+    own_employees = [p.employee for p in people.values() if p.employee.point_id == shift.point_id]
     return render(request, "payroll/attendance.html", {
         "shift": shift,
-        "on_shift": on_shift,
-        "from_day": list(from_day.values()),
-        "regulars": regulars,
+        "categories": [c for c in categories.values() if c.people],
         "others": others,
         "count": on_shift_count(shift),
-        "own_employees": [e for e in regulars if e.point_id == shift.point_id]
-                         + [a.employee for a in on_shift if a.employee.point_id == shift.point_id],
+        "issues_count": _issues_count(records.values()),
+        "own_employees": sorted(own_employees, key=lambda e: e.full_name.lower()),
         "start": local(shift.planned_start, shift.point),
-        "now_hm": f"{local(timezone.now(), shift.point):%H:%M}",
-        "tiers": list(rules.tiers.all()),
-        "absence_fine": rules.absence_fine,
         "sheet_on": bool(settings.GOOGLE_SHEET_URL),
         "can_be_full": can_be_full(shift),
         "full_end": shift.point.night_shift_end,
         "positions": [(v, label) for v, label in Employee.Position.choices if v != Employee.Position.ADMIN],
         "hour_choices": [1, 2, 3],
     })
+
+
+def _issues_count(records) -> int:
+    return sum((a.status in (Attendance.Status.ABSENT, Attendance.Status.LATE)) + a.penalties.count() for a in records)
+
+
+@login_required
+def issues_page(request, shift_id: int):
+    """«Косяки»: кто не вышел, кто опоздал, штрафы — с причиной."""
+    shift = _own_open_shift(request, shift_id)
+    if shift.needs_late_reason:
+        return redirect("home")
+    records = _shift_records(shift)
+    rules = FineRules.current()
+    from_day = full_from_day(shift)
+    expected = sorted(
+        [e for e in employees_for(shift) if e.id not in from_day]
+        + [a.employee for a in records.values() if a.employee.id not in {e.id for e in employees_for(shift)}],
+        key=lambda e: e.full_name.lower(),
+    )
+    on_shift = sorted([a for a in records.values() if a.status in Attendance.WORKED],
+                      key=lambda a: a.employee.full_name.lower())
+    absent = [a for a in records.values() if a.status == Attendance.Status.ABSENT]
+    late = [a for a in records.values() if a.status == Attendance.Status.LATE]
+    penalties = [p for a in on_shift for p in a.penalties.all()]
+    kind = request.GET.get("kind", "absent")
+    return render(request, "payroll/issues.html", {
+        "shift": shift,
+        "kind": kind if kind in ("absent", "late", "penalty") else "absent",
+        "expected": expected,
+        "on_shift": on_shift,
+        "absent": absent,
+        "late": late,
+        "penalties": penalties,
+        "absence_fine": rules.absence_fine,
+        "tiers": list(rules.tiers.all()),
+        "now_hm": f"{local(timezone.now(), shift.point):%H:%M}",
+        "start": local(shift.planned_start, shift.point),
+    })
+
+
+@login_required
+@require_POST
+def issue_add_view(request, shift_id: int):
+    shift = _own_open_shift(request, shift_id)
+    kind = request.POST.get("kind", "")
+    back = f"{reverse('issues', args=[shift.id])}?kind={kind}"
+    employee = Employee.objects.filter(pk=request.POST.get("employee") or 0).first()
+    if employee is None:
+        messages.error(request, "Выберите сотрудника.")
+        return redirect(back)
+    try:
+        if kind == "absent":
+            a = mark(shift, employee, Attendance.Status.ABSENT, user=request.user, reason=request.POST.get("reason", ""),
+                     fine=request.POST.get("fine", ""))
+            messages.warning(request, f"{employee}: не вышел{f', штраф {money(a.fine)}' if a.fine else ''}. "
+                                      f"Управляющему ушло сообщение.")
+        elif kind == "late":
+            current = Attendance.objects.filter(shift=shift, employee=employee).first()
+            a = mark(shift, employee, Attendance.Status.LATE, user=request.user,
+                     arrived=request.POST.get("arrived", ""), reason=request.POST.get("reason", ""),
+                     full=bool(current and current.kind == Attendance.Kind.FULL),
+                     position=current.position if current else "")
+            messages.warning(request, f"{employee}: опоздал на {a.late_human}"
+                                      f"{f', штраф {money(a.fine)}' if a.fine else ''}.")
+        elif kind == "penalty":
+            a = get_object_or_404(Attendance, shift=shift, employee=employee, status__in=Attendance.WORKED)
+            p = add_penalty(a, amount=request.POST.get("amount", ""), reason=request.POST.get("reason", ""),
+                            user=request.user)
+            messages.warning(request, f"{employee}: штраф {money(p.amount)} — {p.reason}.")
+        else:
+            messages.error(request, "Выберите: не вышел, опоздал или штраф.")
+    except PayrollError as error:
+        messages.error(request, f"{employee}: {error}")
+    return redirect(back)
+
+
+@login_required
+@require_POST
+def late_clear_view(request, shift_id: int, attendance_id: int):
+    """Опоздание записали по ошибке — человек пришёл вовремя."""
+    shift = _own_open_shift(request, shift_id)
+    a = get_object_or_404(Attendance.objects.select_related("employee"), pk=attendance_id, shift=shift)
+    mark(shift, a.employee, Attendance.Status.ON_TIME, user=request.user, full=a.kind == Attendance.Kind.FULL,
+         position=a.position)
+    messages.success(request, f"{a.employee}: опоздание убрано.")
+    return redirect(f"{reverse('issues', args=[shift.id])}?kind=late")
 
 
 @login_required
@@ -161,7 +304,7 @@ def penalty_delete_view(request, shift_id: int, penalty_id: int):
     penalty = get_object_or_404(Penalty.objects.select_related("attendance"), pk=penalty_id, attendance__shift=shift)
     employee_id = penalty.attendance.employee_id
     remove_penalty(penalty)
-    return _back(shift, employee_id)
+    return _back(shift, employee_id, request)
 
 
 @login_required
@@ -202,9 +345,9 @@ def remove_view(request, shift_id: int, attendance_id: int):
         remove_from_shift(attendance)
     except PayrollError as error:
         messages.error(request, f"{attendance.employee}: {error}")
-        return _back(shift, attendance.employee_id)
+        return _back(shift, attendance.employee_id, request)
     messages.success(request, f"{attendance.employee} убран со смены.")
-    return _back(shift)
+    return _back(shift, None, request)
 
 
 @login_required
@@ -230,7 +373,7 @@ def new_employee_view(request, shift_id: int):
 def left_view(request, shift_id: int, employee_id: int):
     """«Больше не работает»."""
     shift = _own_open_shift(request, shift_id)
-    employee = get_object_or_404(Employee, pk=employee_id, is_active=True)
+    employee = get_object_or_404(Employee, pk=request.POST.get("employee") or employee_id, is_active=True)
     try:
         mark_left(shift, employee, user=request.user)
     except PayrollError as error:

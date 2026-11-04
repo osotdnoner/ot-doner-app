@@ -128,7 +128,7 @@ def parse_arrival(shift, value: str, now: datetime) -> datetime:
 
 @transaction.atomic
 def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", reason: str = "",
-         full: bool = False, position: str = "", instead_of: Employee | None = None,
+         full: bool = False, position: str = "", instead_of: Employee | None = None, fine=None,
          now: datetime | None = None) -> Attendance:
     """
     Отметка сотрудника. position — кем он работает именно в эту смену, если не по своей обычной должности
@@ -177,7 +177,15 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
             raise PayrollError("Напишите, почему сотрудник не вышел.")
         if has_bonus:
             raise PayrollError("У сотрудника есть бонус, штраф или часы за эту смену. Сначала удалите их.")
-        arrived_at, minutes, fine = None, 0, rules.absence_fine
+        arrived_at, minutes = None, 0
+        # Штраф за невыход: сколько вписал админ (0 — без штрафа), а если пусто — по правилам шефа
+        typed = "" if fine is None else str(fine).strip()
+        if not typed:
+            fine = rules.absence_fine
+        elif typed.strip("0") == "":
+            fine = 0
+        else:
+            fine = parse_amount(typed, "штрафа")
 
     attendance.status = status
     worked = status in Attendance.WORKED
