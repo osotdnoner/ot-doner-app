@@ -18,7 +18,7 @@ from staff.models import Employee
 
 from . import sheets
 from .models import Attendance, Bonus, FineRules
-from .services import PayrollError, add_bonus, mark, marked_count, record_admin
+from .services import PayrollError, add_bonus, mark, on_shift_count, record_admin
 
 
 def day_shift(point, admin, day=16):
@@ -49,7 +49,7 @@ class MarkTests(TestCase):
     def test_on_time(self):
         a = mark(self.shift, self.cashier, "on_time", user=self.admin, now=at(10, 30))
         self.assertEqual((a.status, a.fine, a.late_minutes), ("on_time", 0, 0))
-        self.assertEqual(marked_count(self.shift), (1, 1))
+        self.assertEqual(on_shift_count(self.shift), 1)
 
     def test_late_counts_minutes_and_fine(self):
         a = mark(self.shift, self.cashier, "late", arrived="10:25", reason="Пробка", user=self.admin, now=at(10, 30))
@@ -103,7 +103,7 @@ class MarkTests(TestCase):
         admin_employee = Employee.objects.get(user=self.admin)
         with self.assertRaisesMessage(PayrollError, "нет в списке"):
             mark(self.shift, admin_employee, "on_time", user=self.admin)
-        self.assertEqual(marked_count(self.shift), (0, 1))
+        self.assertEqual(on_shift_count(self.shift), 0)  # администратор не считается
 
     def test_bonus(self):
         a = mark(self.shift, self.cashier, "on_time", user=self.admin)
@@ -247,7 +247,7 @@ class AttendancePageTests(TestCase):
     def test_page_lists_employees_without_admin(self):
         page = self.client.get(self.url)
         self.assertContains(page, "Айдос")
-        self.assertContains(page, "отмечено 0 из 1")
+        self.assertContains(page, "на смене: <strong>0</strong>")
         self.assertNotContains(page, "item-title\">Ислам")
 
     def test_mark_and_bonus(self):
@@ -345,12 +345,12 @@ class FullShiftAndDayOffTests(TestCase):
         a = mark(self.day, self.doner, "on_time", full=True, user=self.day_admin, now=at(10, 5))
         self.assertEqual(a.kind, "full")
         mark(self.day, self.cashier, "on_time", user=self.day_admin, now=at(10, 5))
-        self.assertEqual(marked_count(self.night), (1, 2))  # Ерлан уже на полной смене
+        self.assertEqual(on_shift_count(self.night), 1)  # Ерлан уже на полной смене
         with self.assertRaisesMessage(PayrollError, "полной смене"):
             mark(self.night, self.doner, "on_time", user=self.night_admin, now=at(18, 5))
         b = mark(self.night, self.cashier, "off", user=self.night_admin, now=at(18, 5))
         self.assertEqual((b.kind, b.fine), ("night", 0))
-        self.assertEqual(marked_count(self.night), (2, 2))
+        self.assertEqual(on_shift_count(self.night), 1)  # «выходной» не считается
 
     def test_night_admin_cannot_mark_full(self):
         a = mark(self.night, self.cashier, "on_time", full=True, user=self.night_admin, now=at(18, 5))
@@ -452,32 +452,36 @@ class SubstitutePenaltyAdvanceTests(TestCase):
         p = self.last_payload()
         return [dict(zip(p["headers"], r)) for r in p["rows"]]
 
-    def test_substitute_from_other_branch_takes_position_of_replaced(self):
-        from .services import add_substitute
+    def test_substitute_from_other_branch(self):
         mark(self.shift, self.doner, "absent", reason="Заболел", user=self.admin, now=at(10, 5))
-        a = add_substitute(self.shift, self.from17, user=self.admin, instead_of=self.doner, now=at(10, 40))
+        a = mark(self.shift, self.from17, "on_time", position="doner", instead_of=self.doner, user=self.admin,
+                 now=at(10, 40))
         self.assertTrue(a.is_substitute)
         self.assertEqual((a.status, a.position_display), ("on_time", "Донерщик"))
         row = self.rows()[0]
         self.assertEqual((row["Филиал"], row["Родной филиал"], row["Должность"]), ("27 мкрн", "17 мкрн", "Донерщик"))
         self.assertEqual(row["Замена"], "Замена: вместо Ерлан, с филиала 17 мкрн")
         self.assertEqual((row["Выход"], row["Штраф, ₸"]), ("Пришёл вовремя", 0))
+        # «Изменить» без «вместо кого» не стирает замену
+        a = mark(self.shift, self.from17, "late", arrived="10:30", reason="Автобус", position="doner",
+                 user=self.admin, now=at(10, 40))
+        self.assertEqual(a.substitute_for, self.doner)
 
-    def test_reserve_substitute_and_removal(self):
-        from .services import add_substitute, remove_substitute, substitute_candidates
-        self.assertEqual(set(substitute_candidates(self.shift)), {self.from17, self.reserve})
-        a = add_substitute(self.shift, self.reserve, user=self.admin, now=at(10, 40))
+    def test_reserve_and_removal(self):
+        from .services import others_for, remove_from_shift
+        self.assertEqual(set(others_for(self.shift)), {self.doner, self.cashier, self.from17, self.reserve})
+        a = mark(self.shift, self.reserve, "on_time", user=self.admin, now=at(10, 40))
         self.assertEqual(self.rows()[0]["Замена"], "Замена: из резерва")
         self.assertEqual(self.rows()[0]["Родной филиал"], "Резерв")
-        self.assertNotIn(self.reserve, substitute_candidates(self.shift))
-        with self.assertRaisesMessage(PayrollError, "уже на смене"):
-            add_substitute(self.shift, self.reserve, user=self.admin)
-        with self.assertRaisesMessage(PayrollError, "сотрудник вашего филиала"):
-            add_substitute(self.shift, self.cashier, user=self.admin)
         key = f"S{self.shift.id}-E{self.reserve.id}"
-        remove_substitute(a)
+        remove_from_shift(a)
         self.assertEqual(self.last_payload()["delete"], [key])
         self.assertFalse(Attendance.objects.filter(employee=self.reserve).exists())
+        # с бонусом убрать нельзя — сначала удалить бонус
+        b = mark(self.shift, self.cashier, "on_time", user=self.admin, now=at(10, 40))
+        add_bonus(b, amount=1000, reason="Пик", user=self.admin)
+        with self.assertRaisesMessage(PayrollError, "Сначала удалите их"):
+            remove_from_shift(b)
 
     def test_penalty_during_shift(self):
         from .services import add_penalty, remove_penalty
@@ -530,20 +534,21 @@ class SubstitutePenaltyAdvanceTests(TestCase):
                                     checked_in_at=now - timedelta(hours=1), selfie=fake_selfie())
         self.client.login(username="87010000001", password="test12345")
         page = self.client.get(reverse("attendance", args=[live.id]))
-        self.assertContains(page, "+ Вызвать замену")
-        self.assertContains(page, "Резерв (выручалки)")
-        self.assertContains(page, "Нурбек")
-        response = self.client.post(reverse("substitute_add", args=[live.id]),
-                                    {"employee": self.reserve.id, "instead_of": self.doner.id}, follow=True)
-        self.assertContains(response, "Даурен на замене")
-        self.assertContains(response, "вместо Ерлан")
+        self.assertContains(page, "Найти сотрудника")
+        self.assertContains(page, "Другие точки и резерв")
+        self.assertContains(page, "Нурбек")  # в поиске
+        self.assertContains(page, "+ Новый сотрудник")
+        response = self.client.post(reverse("attendance_mark", args=[live.id, self.reserve.id]),
+                                    {"status": "on_time", "position": "doner", "instead_of": self.doner.id}, follow=True)
+        self.assertContains(response, "Вместо Ерлан")
         self.assertContains(response, "Заменяет: Даурен")
+        self.assertContains(response, "на смене: <strong>1</strong>")
         response = self.client.post(reverse("attendance_penalty", args=[live.id, self.reserve.id]),
                                     {"amount": "1000", "reason": "Опоздал с перерыва"}, follow=True)
-        self.assertContains(response, "Штраф 1 000 ₸ — Опоздал с перерыва")
+        self.assertContains(response, "Штраф 1\u00a0000\u00a0₸ — Опоздал с перерыва")
         response = self.client.post(reverse("attendance_advance", args=[live.id, self.cashier.id]),
                                     {"amount": "10000", "comment": "наличными"}, follow=True)
-        self.assertContains(response, "Аванс 10 000 ₸ — наличными")
+        self.assertContains(response, "Аванс 10\u00a0000\u00a0₸ — наличными")
         # аванс человеку с чужого филиала, которого нет на смене, — нельзя
         response = self.client.post(reverse("attendance_advance", args=[live.id, self.from17.id]), {"amount": "1000"})
         self.assertEqual(response.status_code, 404)
@@ -551,8 +556,7 @@ class SubstitutePenaltyAdvanceTests(TestCase):
     def test_substitute_is_checked_for_uniform(self):
         from checklists.models import ChecklistTemplate
         from checklists.services import build_view, get_or_start_run
-        from .services import add_substitute
-        add_substitute(self.shift, self.reserve, user=self.admin, now=at(10, 40))
+        mark(self.shift, self.reserve, "on_time", user=self.admin, now=at(10, 40))
         run = get_or_start_run(self.shift, ChecklistTemplate.objects.get(code="hall"))
         staff = [e for v in build_view(run) for e, _ in v.staff]
         self.assertEqual(staff, [self.reserve])
@@ -808,3 +812,104 @@ class TodayPositionTests(TestCase):
         self.assertContains(response, "Сабина: сегодня раннер кассы.")
         self.assertContains(response, "Сегодня: <strong>Раннер кассы</strong> · обычно кассир")
         self.assertContains(response, '<option value="runner" selected>Раннер кассы</option>', html=True)
+
+
+@override_settings(MEDIA_ROOT="/tmp/otdoner-test-media", GOOGLE_SHEET_URL="")
+class StaffBaseTests(TestCase):
+    """Общая база: список точки, поиск, новый сотрудник со смены, «Больше не работает»."""
+
+    def setUp(self):
+        self.p27 = Point.objects.create(name="27 мкрн")
+        self.p17 = Point.objects.create(name="17 мкрн")
+        self.admin = User.objects.create_user("87010000001", password="test12345", first_name="Ислам")
+        self.admin.points.add(self.p27)
+        self.boss = User.objects.create_user("87010000009", role=User.Role.OWNER, telegram_chat_id="999")
+        self.aidos = Employee.objects.create(point=self.p27, full_name="Айдос", position="cashier")
+        self.nurbek = Employee.objects.create(point=self.p17, full_name="Нурбек", position="doner")
+        self.shift = day_shift(self.p27, self.admin, day=20)
+
+    def test_point_list_learns_who_works_here(self):
+        from .services import employees_for, others_for
+        self.assertEqual(employees_for(self.shift), [self.aidos])
+        self.assertIn(self.nurbek, others_for(self.shift))
+        # Нурбек с 17 мкрн вышел сюда — на следующих сменах он уже в списке 27 мкрн
+        mark(self.shift, self.nurbek, "on_time", user=self.admin, now=at(10, 5, day=20))
+        later = day_shift(self.p27, self.admin, day=25)
+        self.assertEqual(employees_for(later), [self.aidos, self.nurbek])  # свои первыми
+
+    def test_long_absent_own_employee_hides_but_is_searchable(self):
+        from .services import employees_for, others_for
+        Employee.objects.filter(pk=self.aidos.pk).update(created_at=at(10, day=1) - timedelta(days=60))
+        self.assertEqual(employees_for(self.shift), [])
+        self.assertIn(self.aidos, others_for(self.shift))
+        mark(self.shift, self.aidos, "on_time", user=self.admin, now=at(10, 5, day=20))
+        self.assertEqual(employees_for(day_shift(self.p27, self.admin, day=22)), [self.aidos])
+
+    def test_new_employee_from_shift(self):
+        from .services import add_new_employee
+        a = add_new_employee(self.shift, full_name="  Сабина   Касымова ", position="cashier", user=self.admin,
+                             kaspi_phone="8 777 123 45 67", kaspi_name="Сабина К.", now=at(10, 5, day=20))
+        e = a.employee
+        self.assertEqual((e.full_name, e.point, e.added_by, e.kaspi_phone), ("Сабина Касымова", self.p27, self.admin,
+                                                                          "+7 777 123 45 67"))
+        self.assertEqual(a.status, "on_time")
+        note = Notification.objects.get(event=Notification.Event.STAFF)
+        self.assertEqual(note.title, "Новый сотрудник")
+        self.assertIn("Сабина Касымова (кассир)", note.text)
+        with self.assertRaisesMessage(PayrollError, "уже есть в базе"):
+            add_new_employee(self.shift, full_name="сабина касымова", position="cashier", user=self.admin)
+        with self.assertRaisesMessage(PayrollError, "Kaspi показывает"):
+            add_new_employee(self.shift, full_name="Ерлан Б", position="doner", user=self.admin, kaspi_phone="87771112233")
+        with self.assertRaisesMessage(PayrollError, "Выберите должность"):
+            add_new_employee(self.shift, full_name="Ерлан Б", position="admin", user=self.admin)
+        self.assertFalse(Employee.objects.filter(full_name="Ерлан Б").exists())
+
+    def test_left(self):
+        from .services import employees_for, mark_left, others_for
+        mark_left(self.shift, self.aidos, user=self.admin)
+        self.aidos.refresh_from_db()
+        self.assertEqual((self.aidos.is_active, self.aidos.left_by), (False, self.admin))
+        self.assertIsNotNone(self.aidos.left_at)
+        self.assertEqual(employees_for(self.shift), [])
+        self.assertNotIn(self.aidos, others_for(self.shift))
+        self.assertIn("больше не работает", Notification.objects.get(event=Notification.Event.STAFF).text)
+        with self.assertRaisesMessage(PayrollError, "Больше не работает"):
+            mark(self.shift, self.aidos, "on_time", user=self.admin)
+        with self.assertRaisesMessage(PayrollError, "другой точки"):
+            mark_left(self.shift, self.nurbek, user=self.admin)
+
+    def test_boss_returns_employee(self):
+        from .services import mark_left
+        mark_left(self.shift, self.aidos, user=self.admin)
+        User.objects.create_superuser("87000000000", password="test12345", role=User.Role.MANAGER)
+        self.client.login(username="87000000000", password="test12345")
+        page = self.client.get(reverse("admin:staff_employee_changelist"))
+        self.assertContains(page, "ушёл")
+        response = self.client.post(reverse("admin:staff_employee_change", args=[self.aidos.id]), {
+            "full_name": "Айдос", "point": self.p27.id, "position": "cashier", "phone": "", "is_active": "on",
+            "kaspi_phone": "", "kaspi_name": "", "left_at": "",
+        })
+        self.assertEqual(response.status_code, 302, response.content[:2000])
+        self.aidos.refresh_from_db()
+        self.assertEqual((self.aidos.is_active, self.aidos.left_at, self.aidos.left_by), (True, None, None))
+
+    def test_screen(self):
+        now = timezone.now()
+        live = Shift.objects.create(point=self.p27, admin=self.admin, kind=Shift.Kind.DAY,
+                                    planned_start=now - timedelta(hours=1), planned_end=now + timedelta(hours=8),
+                                    checked_in_at=now - timedelta(hours=1), selfie=fake_selfie())
+        self.client.login(username="87010000001", password="test12345")
+        page = self.client.get(reverse("attendance", args=[live.id]))
+        self.assertContains(page, "Отметьте, кто пришёл")
+        self.assertContains(page, 'class="item other"')  # Нурбек — в поиске, скрыт до ввода
+        response = self.client.post(reverse("employee_new", args=[live.id]),
+                                    {"full_name": "Даурен", "position": "runner", "phone": "", "kaspi_phone": "",
+                                     "kaspi_name": ""}, follow=True)
+        self.assertContains(response, "Даурен добавлен и отмечен на смене")
+        self.assertContains(response, "на смене: <strong>1</strong>")
+        response = self.client.post(reverse("employee_left", args=[live.id, self.aidos.id]), follow=True)
+        self.assertContains(response, "Айдос больше не в списке")
+        dauren = Attendance.objects.get(employee__full_name="Даурен")
+        response = self.client.post(reverse("attendance_remove", args=[live.id, dauren.id]), follow=True)
+        self.assertContains(response, "Даурен убран со смены")
+        self.assertContains(response, "на смене: <strong>0</strong>")

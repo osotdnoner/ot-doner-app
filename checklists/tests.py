@@ -64,9 +64,11 @@ class ChecklistServiceTests(TestCase):
         with self.assertRaisesMessage(ChecklistError, "Сначала отметьте"):
             answer_staff(self.run, self.cleaner, uniform_ok=True, user=self.admin)
 
-    def test_finish_needs_everyone_marked(self):
-        self.came(self.cashier)
-        with self.assertRaisesMessage(ChecklistError, "Сначала отметьте сотрудников на смене: осталось 1"):
+    def test_finish_needs_staff_marked(self):
+        with self.assertRaisesMessage(ChecklistError, "Сначала отметьте, кто вышел на смену"):
+            finish_run(self.run)
+        self.came(self.cashier)  # отмечать всех не нужно — дальше проверяются пункты осмотра
+        with self.assertRaisesMessage(ChecklistError, "Пройдите все пункты"):
             finish_run(self.run)
 
     def test_toilets_are_numbered_when_there_are_several(self):

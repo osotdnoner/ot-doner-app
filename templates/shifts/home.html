@@ -73,10 +73,8 @@
   <div class="card tabs">
     <a class="tab-row" href="{% url 'attendance' shift.id %}">
       <span class="tab-name">1. Сотрудники на смене</span>
-      {% if staff_marked.1 and staff_marked.0 == staff_marked.1 %}
-        <span class="pill pill-ok">Готово</span>
-      {% elif staff_marked.0 %}
-        <span class="pill">{{ staff_marked.0 }} из {{ staff_marked.1 }}</span>
+      {% if staff_on_shift %}
+        <span class="pill pill-ok">На смене: {{ staff_on_shift }}</span>
       {% else %}
         <span class="pill pill-todo">Отметить</span>
       {% endif %}

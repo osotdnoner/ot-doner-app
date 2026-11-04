@@ -3,6 +3,7 @@ import re
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 
 def normalize_kz_phone(value: str) -> str:
@@ -58,6 +59,19 @@ class Employee(models.Model):
         "Kaspi Gold: имя получателя", max_length=80, blank=True,
         help_text="Как Kaspi показывает получателя при переводе по этому номеру, например «Ержан Б.». "
                   "Бухгалтер сверяет его перед отправкой денег.",
+    )
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, verbose_name="Кто добавил", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField("Добавлен", default=timezone.now, editable=False)
+    left_at = models.DateField(
+        "Больше не работает с", null=True, blank=True,
+        help_text="Ставит администратор кнопкой «Больше не работает». Чтобы вернуть человека, отметьте «Работает».",
+    )
+    left_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, verbose_name="Кто отметил уход", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+",
     )
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL, verbose_name="Аккаунт в приложении", on_delete=models.SET_NULL,

@@ -8,7 +8,7 @@ from django.views.decorators.http import require_POST
 
 from checklists.models import ChecklistTemplate
 from checklists.services import open_tasks, progress
-from payroll.services import marked_count, record_admin
+from payroll.services import on_shift_count, record_admin
 
 from .forms import CheckinForm, LateReasonForm
 from .models import Shift
@@ -44,7 +44,7 @@ def home(request):
         "location_point_ids": ",".join(str(p.id) for p in points if p.require_location),
         "late_form": LateReasonForm() if shift and shift.needs_late_reason else None,
         "tabs": acceptance_tabs(shift) if shift else [],
-        "staff_marked": marked_count(shift) if shift else (0, 0),
+        "staff_on_shift": on_shift_count(shift) if shift else 0,
         "tasks": list(open_tasks(shift.point)) if shift else [],
         "now": now,
     })

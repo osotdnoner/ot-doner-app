@@ -8,14 +8,18 @@
 Бонус, штраф во время смены и аванс администратор ставит сам: сумма и за что.
 Переработку и недоработку — в часах. Если сменщик опоздал и кто-то задержался за него, одно
 нажатие ставит переработку задержавшемуся и недоработку опоздавшему. Деньги за часы считает таблица.
-Если кто-то не вышел, админ вызывает замену: человека с другого филиала или из резерва (выручалку).
+Сотрудники — общая база сети. В списке точки — её сотрудники и те, кто выходил сюда за последний месяц;
+любого другого админ находит поиском по имени. Отмечать нужно только тех, кто пришёл (или не вышел).
+Нового человека админ добавляет прямо со смены, ушедшего — кнопкой «Больше не работает»; шефу приходит сообщение.
 Каждое изменение сразу уходит в Google Таблицу (см. sheets.py).
 """
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from notifications.models import Notification
@@ -27,6 +31,8 @@ from .models import Advance, Attendance, Bonus, ExtraHours, FineRules, Penalty
 
 MAX_AMOUNT = 1_000_000
 MAX_HOURS = 12
+RECENT_DAYS = 30  # кто выходил на точку за это время — в её списке
+STALE_DAYS = 45   # свой сотрудник, не выходивший столько дней, из списка точки скрывается (поиск находит)
 
 
 class PayrollError(Exception):
@@ -37,12 +43,40 @@ def local(dt: datetime, point) -> datetime:
     return timezone.localtime(dt, ZoneInfo(point.timezone))
 
 
+def staff_base():
+    """Все, кого можно отметить: работающие сотрудники сети, кроме администраторов."""
+    return Employee.objects.filter(is_active=True).exclude(position=Employee.Position.ADMIN).select_related("point")
+
+
+def regulars_for(shift):
+    """
+    Список точки на экране смены: её сотрудники и те, кто выходил сюда за последние 30 дней.
+    Свой сотрудник, который не выходил 45 дней (и добавлен давно), из списка скрывается — поиск его найдёт.
+    """
+    start = shift.planned_start
+    worked_here = Attendance.objects.filter(
+        shift__point=shift.point, status__in=Attendance.WORKED,
+        shift__planned_start__gte=start - timedelta(days=RECENT_DAYS),
+    ).values("employee_id")
+    worked_anywhere = Attendance.objects.filter(
+        status__in=Attendance.WORKED, shift__planned_start__gte=start - timedelta(days=STALE_DAYS),
+    ).values("employee_id")
+    fresh = Q(created_at__gte=start - timedelta(days=STALE_DAYS))
+    own = Q(point=shift.point) & (Q(id__in=worked_anywhere) | fresh)
+    return staff_base().filter(own | Q(id__in=worked_here))
+
+
 def employees_for(shift):
-    """Кого отмечает администратор: сотрудники точки, кроме администраторов."""
+    """Список точки по порядку: сначала свои по должностям, потом с других точек."""
+    people = list(regulars_for(shift))
+    return sorted(people, key=lambda e: (e.point_id != shift.point_id, e.position, e.full_name.lower()))
+
+
+def others_for(shift, exclude_ids=()):
+    """Остальные сотрудники сети — для поиска по имени."""
     return (
-        Employee.objects.filter(point=shift.point, is_active=True)
-        .exclude(position=Employee.Position.ADMIN)
-        .order_by("position", "full_name")
+        staff_base().exclude(id__in=list(exclude_ids))
+        .order_by("point__name", "full_name")
     )
 
 
@@ -59,11 +93,13 @@ def full_from_day(shift) -> dict[int, Attendance]:
     return {a.employee_id: a for a in records}
 
 
-def marked_count(shift) -> tuple[int, int]:
-    employees = employees_for(shift)
-    ids = set(Attendance.objects.filter(shift=shift, employee__in=employees).values_list("employee_id", flat=True))
-    ids |= set(full_from_day(shift))
-    return len(ids & set(employees.values_list("id", flat=True))), employees.count()
+def on_shift_count(shift) -> int:
+    """Сколько человек отмечено на смене (пришли, опоздали или не вышли), без администратора."""
+    ids = set(
+        Attendance.objects.filter(shift=shift).exclude(status=Attendance.Status.OFF)
+        .exclude(employee__position=Employee.Position.ADMIN).values_list("employee_id", flat=True)
+    )
+    return len(ids | set(full_from_day(shift)))
 
 
 def can_be_full(shift) -> bool:
@@ -92,20 +128,25 @@ def parse_arrival(shift, value: str, now: datetime) -> datetime:
 
 @transaction.atomic
 def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", reason: str = "",
-         full: bool = False, position: str = "", now: datetime | None = None) -> Attendance:
+         full: bool = False, position: str = "", instead_of: Employee | None = None,
+         now: datetime | None = None) -> Attendance:
     """
     Отметка сотрудника. position — кем он работает именно в эту смену, если не по своей обычной должности
     (например, кассир сегодня на раннере кассы). Пусто — обычная должность.
     """
     now = now or timezone.now()
-    if employee.point_id != shift.point_id or employee.position == Employee.Position.ADMIN:
-        raise PayrollError("Этого сотрудника нет в списке точки.")
+    if employee.position == Employee.Position.ADMIN:
+        raise PayrollError("Этого сотрудника нет в списке: администратор отмечается кнопкой «Я пришёл».")
+    if not employee.is_active:
+        raise PayrollError("Сотрудник отмечен как «Больше не работает». Вернуть его может управляющий в панели.")
     if status not in Attendance.Status.values:
         raise PayrollError("Выберите: вовремя, опоздал, не вышел или выходной.")
     if employee.id in full_from_day(shift):
         raise PayrollError("Сотрудник на полной смене — его уже отметил дневной администратор.")
     if position and (position not in Employee.Position.values or position == Employee.Position.ADMIN):
         raise PayrollError("Выберите должность из списка.")
+    if instead_of is not None and instead_of.id == employee.id:
+        instead_of = None
     reason = reason.strip()
     rules = FineRules.current()
     attendance = Attendance.objects.filter(shift=shift, employee=employee).first() or Attendance(
@@ -142,6 +183,8 @@ def mark(shift, employee: Employee, status: str, *, user, arrived: str = "", rea
     worked = status in Attendance.WORKED
     attendance.kind = Attendance.Kind.FULL if (full and worked and can_be_full(shift)) else shift.kind
     attendance.position = position if (worked and position != employee.position) else ""
+    if instead_of is not None or not worked:
+        attendance.substitute_for = instead_of if worked else None
     attendance.arrived_at = arrived_at
     attendance.late_minutes = minutes
     attendance.reason = reason
@@ -308,67 +351,72 @@ def remove_advance(advance: Advance):
     sheets.queue(deletes=[key])
 
 
-def substitute_candidates(shift):
-    """Кого можно вызвать на замену: резерв и сотрудники других филиалов, кто ещё не на этой смене."""
-    already = Attendance.objects.filter(shift=shift).values("employee_id")
-    return (
-        Employee.objects.filter(is_active=True)
-        .exclude(point=shift.point)
-        .exclude(position=Employee.Position.ADMIN)
-        .exclude(id__in=already)
-        .select_related("point")
-        .order_by("point__name", "full_name")
-    )
+def remove_from_shift(attendance: Attendance):
+    """Отметили по ошибке — человек не на этой смене. Строка уходит и из таблицы."""
+    if attendance.bonuses.exists() or attendance.penalties.exists() or attendance.extra_hours.exists():
+        raise PayrollError("У сотрудника есть бонус, штраф или часы за эту смену. Сначала удалите их.")
+    key = sheets.shift_key(attendance)
+    attendance.delete()
+    sheets.queue(deletes=[key])
 
 
-def substitutes_on(shift):
-    return (
-        Attendance.objects.filter(shift=shift).exclude(employee__point=shift.point)
-        .exclude(employee__position=Employee.Position.ADMIN)
-        .select_related("employee__point", "substitute_for")
-        .prefetch_related("bonuses", "penalties", "extra_hours")
-    )
+def _boss_message(shift, title: str, text: str):
+    notify(shift.point, Notification.Event.STAFF, title, text)
 
 
 @transaction.atomic
-def add_substitute(shift, employee: Employee, *, user, instead_of: Employee | None = None, position: str = "",
-                   full: bool = False, now: datetime | None = None) -> Attendance:
-    """Вызвали на замену человека с другого филиала или из резерва."""
-    now = now or timezone.now()
-    if employee.point_id == shift.point_id:
-        raise PayrollError("Это сотрудник вашего филиала — отметьте его в общем списке.")
-    if employee.position == Employee.Position.ADMIN or not employee.is_active:
-        raise PayrollError("Этого человека нельзя вызвать на замену.")
-    if Attendance.objects.filter(shift=shift, employee=employee).exists():
-        raise PayrollError("Этот человек уже на смене.")
-    if instead_of is not None and instead_of.point_id != shift.point_id:
-        raise PayrollError("Заменять можно только сотрудника своего филиала.")
-    if position and position not in Employee.Position.values:
-        raise PayrollError("Выберите должность из списка.")
-    position = position or (instead_of.position if instead_of else "")
-    attendance = Attendance.objects.create(
-        shift=shift, employee=employee, status=Attendance.Status.ON_TIME,
-        kind=Attendance.Kind.FULL if (full and can_be_full(shift)) else shift.kind,
-        arrived_at=now, position=position if position != employee.position else "",
-        substitute_for=instead_of, marked_by=user,
+def add_new_employee(shift, *, full_name: str, position: str, user, phone: str = "", kaspi_phone: str = "",
+                     kaspi_name: str = "", full: bool = False, now: datetime | None = None) -> Attendance:
+    """Новый человек пришёл на первую смену: админ добавляет его в базу и сразу отмечает «Вовремя»."""
+    full_name = " ".join(full_name.split())
+    if len(full_name) < 2:
+        raise PayrollError("Напишите имя и фамилию нового сотрудника.")
+    if position not in Employee.Position.values or position == Employee.Position.ADMIN:
+        raise PayrollError("Выберите должность.")
+    # Сравниваем в Python: регистр кириллицы в базе SQLite не учитывается
+    twin = next((e for e in Employee.objects.select_related("point").only("full_name", "is_active", "point__name")
+                 if e.full_name.lower() == full_name.lower()), None)
+    if twin is not None:
+        where = "уже есть в базе" if twin.is_active else "есть в базе, но отмечен «Больше не работает»"
+        raise PayrollError(f"«{twin.full_name}» ({twin.home}) {where}. Найдите его поиском — или допишите фамилию, "
+                           f"если это другой человек.")
+    employee = Employee(
+        point=shift.point, full_name=full_name[:120], position=position, phone=phone.strip()[:20],
+        kaspi_phone=kaspi_phone, kaspi_name=kaspi_name, added_by=user,
     )
-    sheets.queue([attendance.id])
+    try:
+        employee.full_clean(exclude=["user"])
+    except ValidationError as error:
+        raise PayrollError(" ".join(m for msgs in error.message_dict.values() for m in msgs))
+    employee.save()
+    attendance = mark(shift, employee, Attendance.Status.ON_TIME, user=user, full=full, now=now)
+    kaspi = f"Kaspi: {employee.kaspi_phone} · {employee.kaspi_name}" if employee.kaspi_phone else "Kaspi не указан"
+    _boss_message(
+        shift, "Новый сотрудник",
+        f"Точка «{shift.point}»: администратор {user} добавил {employee} "
+        f"({employee.get_position_display().lower()}) и отметил на смене.\n{kaspi}. "
+        f"Проверьте карточку в панели «Сотрудники».",
+    )
     return attendance
 
 
-def remove_substitute(attendance: Attendance):
-    """Замену добавили по ошибке — убираем и из приложения, и из таблицы."""
-    if not attendance.is_substitute:
-        raise PayrollError("Это сотрудник вашего филиала: поставьте ему «Выходной».")
-    key = sheets.shift_key(attendance)
-    for entry in attendance.extra_hours.all():  # вторая половина связки у другого человека — тоже убрать
-        pair = _hours_pair(entry)
-        if pair is not None and pair.attendance_id != attendance.pk:
-            other = pair.attendance
-            pair.delete()
-            resync(other)
-    attendance.delete()
-    sheets.queue(deletes=[key])
+def mark_left(shift, employee: Employee, *, user, today=None) -> Employee:
+    """«Больше не работает»: человек пропадает из списков, история и зарплата остаются."""
+    if employee.point_id != shift.point_id:
+        raise PayrollError("Это сотрудник другой точки — отметить уход может его администратор или управляющий.")
+    if employee.position == Employee.Position.ADMIN:
+        raise PayrollError("Администраторов отключает управляющий в панели.")
+    employee.is_active = False
+    employee.left_at = today or local(timezone.now(), shift.point).date()
+    employee.left_by = user
+    employee.save(update_fields=["is_active", "left_at", "left_by"])
+    _boss_message(
+        shift, "Сотрудник больше не работает",
+        f"Точка «{shift.point}»: администратор {user} отметил, что {employee} "
+        f"({employee.get_position_display().lower()}) больше не работает. "
+        f"Если это ошибка — верните его в панели «Сотрудники» (галочка «Работает»).",
+    )
+    return employee
 
 
 def resync(attendance: Attendance):

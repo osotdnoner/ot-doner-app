@@ -15,7 +15,7 @@ from django.utils import timezone
 from notifications.models import Notification
 from notifications.service import notify
 from payroll.models import Attendance
-from payroll.services import marked_count
+from payroll.services import on_shift_count
 from staff.models import Employee
 
 from .models import ChecklistTemplate, Item, ItemResult, Run, Section, StaffCheck, Status, Task
@@ -46,7 +46,7 @@ class SectionView:
     section: Section
     entries: list[Entry] = field(default_factory=list)
     staff: list[tuple[Employee, StaffCheck | None]] = field(default_factory=list)
-    unmarked: int = 0  # сколько сотрудников ещё не отмечено на экране «Сотрудники на смене»
+    unmarked: int = 0  # 1 — на экране «Сотрудники на смене» ещё никто не отмечен
 
 
 def make_label(item: Item, toilet_no: int, toilets_count: int) -> str:
@@ -109,8 +109,7 @@ def build_view(run: Run) -> list[SectionView]:
         view = views.setdefault(section.id, SectionView(section))
         if section.includes_staff:
             view.staff = [(e, checks.get(e.id)) for e in staff_for_run(run)]
-            done, total = marked_count(run.shift)
-            view.unmarked = total - done
+            view.unmarked = 0 if on_shift_count(run.shift) else 1
     return [views[s.id] for s in run.template.sections.all() if s.id in views]
 
 
@@ -250,9 +249,8 @@ def finish_run(run: Run, now: datetime | None = None) -> Run:
     now = now or timezone.now()
     _ensure_open(run)
     if run.template.sections.filter(includes_staff=True).exists():
-        marked, employees = marked_count(run.shift)
-        if marked < employees:
-            raise ChecklistError(f"Сначала отметьте сотрудников на смене: осталось {employees - marked}.")
+        if not on_shift_count(run.shift):
+            raise ChecklistError("Сначала отметьте, кто вышел на смену.")
     done, total = progress(run)
     if done < total:
         raise ChecklistError(f"Отмечено {done} из {total}. Пройдите все пункты.")

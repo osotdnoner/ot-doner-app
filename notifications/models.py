@@ -11,6 +11,7 @@ class Notification(models.Model):
         PROBLEMS = "problems", "Неполадки при приёме смены"
         URGENT = "urgent", "Срочное"
         REMINDER = "reminder", "Напоминание"
+        STAFF = "staff", "Сотрудники: новые и ушедшие"
         TEST = "test", "Проверка связи"
 
     class Channel(models.TextChoices):

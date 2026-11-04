@@ -1,0 +1,42 @@
+{% comment %}
+  Форма отметки одного человека. Нужны: shift, employee, a (может быть пустым), positions, can_be_full, full_end,
+  now_hm, own_employees; hidden — спрятать до «Изменить»; ask_instead — показать «Вместо кого».
+{% endcomment %}
+<form method="post" action="{% url 'attendance_mark' shift.id employee.id %}" class="mark-form" id="mark-{{ employee.id }}" {% if hidden %}hidden{% endif %}>
+  {% csrf_token %}
+  {% if can_be_full %}
+  <div class="segmented kind">
+    <label><input type="radio" name="full" value="0" {% if a.kind != "full" %}checked{% endif %}><span>День до {{ shift.point.day_shift_end|time:"H:i" }}</span></label>
+    <label><input type="radio" name="full" value="1" {% if a.kind == "full" %}checked{% endif %}><span>Полная до {{ full_end|time:"H:i" }}</span></label>
+  </div>
+  {% endif %}
+  <label class="pos-line">
+    <span>Кем работает сегодня</span>
+    <select name="position" class="pos-select">
+      {% for value, label in positions %}<option value="{{ value }}" {% if a and a.position_code == value %}selected{% elif not a and employee.position == value %}selected{% endif %}>{{ label }}{% if value == employee.position %} (обычно){% endif %}</option>{% endfor %}
+    </select>
+  </label>
+  {% if ask_instead and own_employees %}
+  <label class="pos-line">
+    <span>Вместо кого</span>
+    <select name="instead_of" class="pos-select">
+      <option value="">— ни вместо кого —</option>
+      {% for o in own_employees %}{% if o.id != employee.id %}<option value="{{ o.id }}" {% if a.substitute_for_id == o.id %}selected{% endif %}>{{ o.full_name }}</option>{% endif %}{% endfor %}
+    </select>
+  </label>
+  {% endif %}
+  <div class="segmented three">
+    <label><input type="radio" name="status" value="on_time" {% if a.status == "on_time" %}checked{% endif %}><span>Пришёл</span></label>
+    <label><input type="radio" name="status" value="late" {% if a.status == "late" %}checked{% endif %}><span>Опоздал</span></label>
+    <label><input type="radio" name="status" value="absent" {% if a.status == "absent" %}checked{% endif %}><span>Не вышел</span></label>
+  </div>
+  <div class="late-part" hidden>
+    <label class="field-label" for="arrived-{{ employee.id }}">Во сколько пришёл</label>
+    <input type="time" id="arrived-{{ employee.id }}" name="arrived" value="{% if a.arrived_at %}{{ a.arrived_at|time:'H:i' }}{% else %}{{ now_hm }}{% endif %}">
+  </div>
+  <div class="reason-part" hidden>
+    <label class="field-label" for="reason-{{ employee.id }}">Причина</label>
+    <textarea id="reason-{{ employee.id }}" name="reason" rows="2" placeholder="Например: проспал, пробка, заболел">{{ a.reason }}</textarea>
+  </div>
+  <button type="submit" class="btn btn-primary save-mark" hidden>Сохранить</button>
+</form>
